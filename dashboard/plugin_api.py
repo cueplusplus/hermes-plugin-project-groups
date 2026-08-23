@@ -113,6 +113,15 @@ def _unique_legacy_text(value: str, used: set[str], *, max_units: int, label: bo
 def normalize_state(raw: Any, *, repair_legacy: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("state must be an object")
+    version = raw.get("version")
+    if (
+        isinstance(version, (int, float))
+        and not isinstance(version, bool)
+        and version > _SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"newer schema version {version} is not supported (maximum {_SCHEMA_VERSION})"
+        )
 
     groups: list[dict[str, Any]] = []
     group_ids: set[str] = set()

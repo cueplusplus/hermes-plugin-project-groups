@@ -171,6 +171,43 @@ class ProjectGroupsApiTest(unittest.TestCase):
 
         atomic_write.assert_not_called()
 
+    def test_newer_schema_is_rejected_without_rewriting_state(self):
+        path = module._state_path()
+        path.parent.mkdir(parents=True)
+        original = (
+            b'{\n'
+            b'  "version": 2,\n'
+            b'  "groups": [{"id": "cue", "name": "CUE++", "futureGroupField": true}],\n'
+            b'  "assignments": {"p1": "cue"},\n'
+            b'  "projectOrder": {"cue": ["p1"]},\n'
+            b'  "futureRootField": {"must": "survive"}\n'
+            b'}\n'
+        )
+        calls = {
+            "read": lambda: module.get_state(),
+            "migration": lambda: module.migrate_state(module.StateEnvelope(state={
+                "groups": [{"id": "other", "name": "Other"}],
+            })),
+            "create group": lambda: module.create_group(module.CreateGroupEnvelope(name="Other")),
+            "assign project": lambda: module.assign_project(module.AssignProjectEnvelope(
+                project_id="p2",
+                group_id="cue",
+            )),
+            "collapse group": lambda: module.set_group_collapsed(module.CollapseGroupEnvelope(
+                group_id="cue",
+                collapsed=True,
+            )),
+        }
+
+        for name, call in calls.items():
+            with self.subTest(entrypoint=name):
+                path.write_bytes(original)
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(call())
+                self.assertEqual(raised.exception.status_code, 500)
+                self.assertIn("newer schema version", raised.exception.detail)
+                self.assertEqual(path.read_bytes(), original)
+
     def test_mutations_cannot_cross_persisted_collection_bounds(self):
         original_groups = module._MAX_GROUPS
         original_assignments = module._MAX_ASSIGNMENTS
