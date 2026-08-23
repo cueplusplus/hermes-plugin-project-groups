@@ -1,12 +1,12 @@
 {
   "name": "hermes-plugin-project-groups",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Group Hermes Desktop Projects into collapsible organization folders.",
   "type": "module",
   "private": false,
   "scripts": {
-    "test": "node --test",
-    "check": "node --check plugin.js && node --test"
+    "test": "node --test && python3 -m unittest discover -s test -p 'test_*.py'",
+    "check": "node --check plugin.js && node --check desktop/plugin.js && node --test && python3 -m unittest discover -s test -p 'test_*.py'"
   },
   "keywords": [
     "hermes-agent",

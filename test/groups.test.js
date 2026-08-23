@@ -8,6 +8,7 @@ import {
   createGroup,
   deleteGroup,
   moveGroup,
+  moveProject,
   normalizeState,
   renameGroup,
   unassignProject
@@ -27,6 +28,12 @@ test('autoGroupProjects assigns organization roots and leaves unrelated projects
   assert.equal(state.assignments.p_labs, 'rgc-labs')
   assert.equal(state.assignments.p_legacy, 'rgc-legacy')
   assert.equal(state.assignments.p_misc, undefined)
+})
+
+test('autoGroupProjects respects an intentionally empty group list', () => {
+  const state = autoGroupProjects(projects, { groups: [], assignments: {}, projectOrder: {} })
+  assert.deepEqual(state.groups, [])
+  assert.deepEqual(state.assignments, {})
 })
 
 test('manual assignments survive automatic grouping', () => {
@@ -54,6 +61,20 @@ test('create, rename, reorder, assign and unassign preserve stable ids', () => {
 
   state = unassignProject(state, 'p_misc')
   assert.equal(state.assignments.p_misc, undefined)
+})
+
+test('project order is explicit, stable, and moves within a group', () => {
+  let state = normalizeState({
+    groups: [{ id: 'cue', name: 'CUE++' }],
+    assignments: { a: 'cue', b: 'cue', c: 'cue' },
+    projectOrder: { cue: ['a', 'b', 'c'] }
+  })
+
+  state = moveProject(state, 'cue', 'c', -1)
+  assert.deepEqual(state.projectOrder.cue, ['a', 'c', 'b'])
+
+  state = moveProject(state, 'cue', 'a', -1)
+  assert.deepEqual(state.projectOrder.cue, ['a', 'c', 'b'])
 })
 
 test('deleting a group removes its project assignments without affecting other groups', () => {

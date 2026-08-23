@@ -1,0 +1,13 @@
+{
+  "name": "project-groups",
+  "label": "Project Groups",
+  "description": "Profile-scoped persistence backend for the Hermes Desktop Project Groups plugin.",
+  "icon": "FolderTree",
+  "version": "0.2.0",
+  "tab": {
+    "path": "/project-groups-backend",
+    "hidden": true
+  },
+  "entry": "noop.js",
+  "api": "plugin_api.py"
+}

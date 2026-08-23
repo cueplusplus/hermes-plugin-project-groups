@@ -23,14 +23,24 @@ A shareable runtime plugin for **Hermes Desktop** that organizes flat Hermes Pro
 
 ## Install
 
-Clone the repository, then copy or symlink `plugin.js` into the active Hermes profile:
+### One-click Desktop install
+
+[Install Project Groups in Hermes](hermes://plugin/install?repo=cueplusplus/hermes-plugin-project-groups)
+
+Hermes opens a confirmation dialog, detects the agent and Desktop halves, and lets the user choose what to install.
+
+### Official CLI installer
 
 ```bash
-mkdir -p ~/.hermes/desktop-plugins/project-groups
-cp plugin.js ~/.hermes/desktop-plugins/project-groups/plugin.js
+hermes plugins install cueplusplus/hermes-plugin-project-groups
+hermes plugins enable project-groups
 ```
 
-For development, a symlink keeps hot reload attached to the checkout:
+The repository follows Hermes's unified plugin layout, so the official installer places the backend under `~/.hermes/plugins/project-groups/` and Desktop loads `desktop/plugin.js` from the same package. Restart the dashboard/gateway only when enabling the backend persistence half.
+
+### Development checkout
+
+A symlink keeps Desktop hot reload attached to a working tree:
 
 ```bash
 mkdir -p ~/.hermes/desktop-plugins/project-groups
@@ -54,22 +64,34 @@ The runtime plugin is plain ESM and has no build step. Its only runtime imports 
 
 The reusable grouping rules in `src/groups.js` are covered by Node's built-in test runner.
 
+## Agent and LLM awareness
+
+The unified package registers three native Hermes surfaces when its agent half is enabled:
+
+- `project_groups_list` — current groups, member Projects/paths, and ungrouped Projects;
+- `project_group_get` — one group by id or name;
+- `project-groups:project-groups` — a bundled skill explaining the model and safe interaction rules.
+
+It also contributes a short bounded system-prompt section so new sessions know that groups are organizational parents—not working directories—and that local/remote Project IDs remain independent.
+
+No MCP server is required. MCP would create a second protocol/process for data already owned by the current Hermes profile. Native plugin tools are smaller, profile-aware, appear in the normal Hermes tool registry, and use the same backend state as the Desktop plugin.
+
 ## Storage and scope
 
-Group definitions and assignments are stored under the plugin's namespaced Desktop storage key:
+The preferred persistence path is the plugin's profile-scoped backend:
 
 ```text
-hermes.plugin.project-groups.state.v1
+$HERMES_HOME/project-groups/state.json
 ```
 
-They are local to a Hermes Desktop profile. Project IDs and filesystem paths are backend/profile-specific, so the plugin deliberately does not claim that a local Project and a remote Project are the same record.
+Writes are validated, bounded, and atomic. The Desktop copy under `hermes.plugin.project-groups.state.v1` is retained as an offline/older-backend fallback and migration source. Project IDs and filesystem paths are backend/profile-specific, so a local Project and a remote Project remain distinct records even when they share an organization group name.
 
 ## Current limitations
 
-- Groups appear on the plugin page, not inline within the built-in Projects list.
-- Group state does not yet sync between Hermes profiles or gateways.
-- Drag-and-drop ordering is not yet implemented; assignments use a select control.
-- The plugin relies on current `projects.*` JSON-RPC methods.
+- Groups appear on the plugin page, not inline within the built-in Projects list. An upstream `projects.presentation` contribution seam is being prepared.
+- Cross-gateway organization identity is not merged automatically; each backend/profile owns its Project assignments.
+- Project ordering currently uses accessible up/down controls; pointer drag-and-drop is planned after the native presentation seam lands.
+- The plugin relies on current `projects.*` JSON-RPC methods and degrades to local storage if the backend API is unavailable.
 
 ## License
 

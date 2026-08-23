@@ -1,0 +1,14 @@
+name: project-groups
+version: 0.2.0
+description: "Group Hermes Desktop Projects into collapsible organization folders with profile-scoped backend persistence."
+author: CUE++
+kind: standalone
+manifest_version: 1
+api_version: 1
+provides_tools:
+  - project_groups_list
+  - project_group_get
+platforms:
+  - linux
+  - macos
+  - windows

@@ -35,7 +35,15 @@ export function normalizeState(input = {}) {
     if (typeof groupId === 'string' && ids.has(groupId)) assignments[projectId] = groupId
   }
 
-  return { version: SCHEMA_VERSION, groups, assignments }
+  const projectOrder = {}
+  const rawOrder = input.projectOrder && typeof input.projectOrder === 'object' ? input.projectOrder : {}
+  for (const [groupId, projectIds] of Object.entries(rawOrder)) {
+    if (groupId !== '__ungrouped__' && !ids.has(groupId)) continue
+    if (!Array.isArray(projectIds)) continue
+    projectOrder[groupId] = [...new Set(projectIds.filter(projectId => typeof projectId === 'string' && projectId.trim()))]
+  }
+
+  return { version: SCHEMA_VERSION, groups, assignments, projectOrder }
 }
 
 export function createGroup(state, group) {
@@ -79,6 +87,19 @@ export function moveGroup(state, groupId, delta) {
   const [group] = groups.splice(index, 1)
   groups.splice(target, 0, group)
   return { ...current, groups }
+}
+
+export function moveProject(state, groupId, projectId, delta) {
+  const current = normalizeState(state)
+  const existing = current.projectOrder[groupId] ?? []
+  const index = existing.indexOf(projectId)
+  if (index < 0) return current
+  const target = Math.max(0, Math.min(existing.length - 1, index + delta))
+  if (target === index) return current
+  const order = [...existing]
+  const [moved] = order.splice(index, 1)
+  order.splice(target, 0, moved)
+  return { ...current, projectOrder: { ...current.projectOrder, [groupId]: order } }
 }
 
 export function deleteGroup(state, groupId) {
@@ -134,8 +155,16 @@ export function projectsByGroup(projects, state) {
     else ungrouped.push(project)
   }
 
-  const sort = rows => rows.sort((a, b) => String(a.name).localeCompare(String(b.name)))
-  Object.values(byGroup).forEach(sort)
-  sort(ungrouped)
+  const ordered = (rows, groupId) => {
+    const order = current.projectOrder[groupId] ?? []
+    const rank = new Map(order.map((id, index) => [id, index]))
+    return rows.sort((a, b) => {
+      const aRank = rank.get(a.id) ?? Number.MAX_SAFE_INTEGER
+      const bRank = rank.get(b.id) ?? Number.MAX_SAFE_INTEGER
+      return aRank - bRank || String(a.name).localeCompare(String(b.name))
+    })
+  }
+  for (const [groupId, rows] of Object.entries(byGroup)) ordered(rows, groupId)
+  ordered(ungrouped, '__ungrouped__')
   return { byGroup, ungrouped }
 }
