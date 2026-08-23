@@ -248,7 +248,10 @@ function ProjectGroupsPage({ ctx, publishPresentation }) {
         setState(seeded)
         setStorageMode('backend synced')
       } else {
-        persist(current => seedState(rows, current))
+        const seeded = seedState(rows, normalizeState(ctx.storage.get(STORAGE_KEY, { groups: DEFAULT_GROUPS })))
+        ctx.storage.set(STORAGE_KEY, seeded)
+        setState(seeded)
+        publishPresentation(seeded)
         setStorageMode('local fallback')
       }
     } catch (cause) {
@@ -256,7 +259,7 @@ function ProjectGroupsPage({ ctx, publishPresentation }) {
     } finally {
       setLoading(false)
     }
-  }, [persist])
+  }, [ctx, publishPresentation])
 
   useEffect(() => {
     void load()
