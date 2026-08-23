@@ -133,9 +133,11 @@ function ProjectRow({ groups, groupId, index, onAssign, onMove, onOpen, project,
   })
 }
 
-function GroupCard({ group, groups, onAssign, onDelete, onMove, onOpen, onRename, onToggle, projects, selected }) {
+function GroupCard({ group, groups, immutable = false, onAssign, onDelete, onMove, onOpen, onRename, onToggle, projects, selected }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(group.name)
+
+  const validRename = cleanName(name)
 
   return jsxs('section', {
     className: 'overflow-hidden rounded-md border border-(--ui-stroke-secondary)',
@@ -156,8 +158,8 @@ function GroupCard({ group, groups, onAssign, onDelete, onMove, onOpen, onRename
                 className: 'h-7 max-w-xs',
                 onChange: event => setName(event.target.value),
                 onKeyDown: event => {
-                  if (event.key === 'Enter') {
-                    onRename(group.id, name)
+                  if (event.key === 'Enter' && validRename) {
+                    onRename(group.id, validRename)
                     setEditing(false)
                   }
                   if (event.key === 'Escape') setEditing(false)
@@ -165,19 +167,21 @@ function GroupCard({ group, groups, onAssign, onDelete, onMove, onOpen, onRename
                 value: name
               })
             : jsx('h2', { className: 'flex-1 text-sm font-semibold', children: `${group.name} (${projects.length})` }),
-          jsx(Button, {
-            onClick: () => setEditing(value => !value),
-            size: 'icon-sm',
-            variant: 'ghost',
-            children: jsx(Codicon, { name: editing ? 'close' : 'edit' })
-          }),
-          jsx(Button, {
-            'aria-label': `Delete ${group.name}`,
-            onClick: () => onDelete(group.id),
-            size: 'icon-sm',
-            variant: 'ghost',
-            children: jsx(Codicon, { name: 'trash' })
-          })
+          !immutable &&
+            jsx(Button, {
+              onClick: () => setEditing(value => !value),
+              size: 'icon-sm',
+              variant: 'ghost',
+              children: jsx(Codicon, { name: editing ? 'close' : 'edit' })
+            }),
+          !immutable &&
+            jsx(Button, {
+              'aria-label': `Delete ${group.name}`,
+              onClick: () => onDelete(group.id),
+              size: 'icon-sm',
+              variant: 'ghost',
+              children: jsx(Codicon, { name: 'trash' })
+            })
         ]
       }),
       !group.collapsed &&
@@ -405,6 +409,7 @@ function ProjectGroupsPage({ ctx, publishPresentation }) {
                 grouped.ungrouped.length > 0 &&
                   jsx(GroupCard, {
                     group: { id: '__ungrouped__', name: 'Ungrouped', collapsed: false },
+                    immutable: true,
                     groups: state.groups,
                     onAssign: assign,
                     onDelete: () => {},
