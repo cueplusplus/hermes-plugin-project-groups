@@ -220,6 +220,7 @@ function ProjectGroupsPage({ ctx, publishPresentation }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [newGroup, setNewGroup] = useState('')
+  const writeQueue = useState(() => ({ chain: Promise.resolve() }))[0]
 
   const persist = useCallback(
     updater =>
@@ -227,13 +228,14 @@ function ProjectGroupsPage({ ctx, publishPresentation }) {
         const next = normalizeState(typeof updater === 'function' ? updater(current) : updater)
         ctx.storage.set(STORAGE_KEY, next)
         publishPresentation(next)
-        void ctx
-          .rest('/state', { method: 'PUT', body: { state: next }, timeoutMs: 5_000 })
+        writeQueue.chain = writeQueue.chain
+          .catch(() => undefined)
+          .then(() => ctx.rest('/state', { method: 'PUT', body: { state: next }, timeoutMs: 5_000 }))
           .then(() => setStorageMode('backend synced'))
           .catch(() => setStorageMode('local fallback'))
         return next
       }),
-    [ctx, publishPresentation]
+    [ctx, publishPresentation, writeQueue]
   )
 
   const load = useCallback(async () => {
@@ -250,6 +252,7 @@ function ProjectGroupsPage({ ctx, publishPresentation }) {
         const seeded = seedState(rows, backend.state)
         ctx.storage.set(STORAGE_KEY, seeded)
         setState(seeded)
+        publishPresentation(seeded)
         setStorageMode('backend synced')
       } else {
         const seeded = seedState(rows, normalizeState(ctx.storage.get(STORAGE_KEY, { groups: DEFAULT_GROUPS })))
@@ -435,16 +438,20 @@ export default {
   register(ctx) {
     const presentationArea = 'projects.presentation'
     const toPresentation = state => ({
-      groups: state.groups.map(group => ({
-        collapsed: group.collapsed,
-        id: group.id,
-        label: group.name,
-        projectIds:
-          state.projectOrder[group.id] ??
-          Object.entries(state.assignments)
-            .filter(([, groupId]) => groupId === group.id)
-            .map(([projectId]) => projectId)
-      }))
+      groups: state.groups.map(group => {
+        const assigned = Object.entries(state.assignments)
+          .filter(([, groupId]) => groupId === group.id)
+          .map(([projectId]) => projectId)
+        const assignedSet = new Set(assigned)
+        const ordered = (state.projectOrder[group.id] ?? []).filter(projectId => assignedSet.has(projectId))
+        const orderedSet = new Set(ordered)
+        return {
+          collapsed: group.collapsed,
+          id: group.id,
+          label: group.name,
+          projectIds: [...ordered, ...assigned.filter(projectId => !orderedSet.has(projectId))]
+        }
+      })
     })
     let disposePresentation = () => {}
     const publishPresentation = state => {
