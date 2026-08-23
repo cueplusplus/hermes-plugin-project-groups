@@ -1,0 +1,18 @@
+{
+  "name": "hermes-plugin-project-groups",
+  "version": "0.1.0",
+  "description": "Group Hermes Desktop Projects into collapsible organization folders.",
+  "type": "module",
+  "private": false,
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check plugin.js && node --test"
+  },
+  "keywords": [
+    "hermes-agent",
+    "hermes-desktop",
+    "desktop-plugin",
+    "project-groups"
+  ],
+  "license": "MIT"
+}
