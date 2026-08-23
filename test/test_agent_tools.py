@@ -1,7 +1,7 @@
 import importlib.util
+import asyncio
 import json
 import os
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +11,12 @@ spec = importlib.util.spec_from_file_location("project_groups_plugin", MODULE_PA
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+API_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
+api_spec = importlib.util.spec_from_file_location("project_groups_api_for_agent_test", API_PATH)
+assert api_spec is not None and api_spec.loader is not None
+api = importlib.util.module_from_spec(api_spec)
+api_spec.loader.exec_module(api)
 
 
 class ProjectGroupsToolsTest(unittest.TestCase):
@@ -57,6 +63,32 @@ class ProjectGroupsToolsTest(unittest.TestCase):
             setattr(module, "_projects", original)
         self.assertFalse(result["success"])
         self.assertIn("not found", result["error"])
+
+    def test_agent_reload_reports_backend_mutations_consistently(self):
+        created = asyncio.run(api.create_group(api.CreateGroupEnvelope(name="Product Design")))
+        group_id = created["state"]["groups"][-1]["id"]
+        backend = asyncio.run(api.assign_project(api.AssignProjectEnvelope(
+            project_id="p_design",
+            group_id=group_id,
+        )))
+
+        reload_spec = importlib.util.spec_from_file_location("project_groups_plugin_reloaded", MODULE_PATH)
+        assert reload_spec is not None and reload_spec.loader is not None
+        reloaded = importlib.util.module_from_spec(reload_spec)
+        reload_spec.loader.exec_module(reloaded)
+        reloaded._projects = lambda: [
+            {"id": "p_cue", "name": "Quotamate", "primary_path": "/work/cue++/quotamate", "archived": False},
+            {"id": "p_design", "name": "Design System", "primary_path": "/work/design", "archived": False},
+        ]
+
+        agent = reloaded.list_groups()
+        expected_assignments = backend["state"]["assignments"]
+        reported_assignments = {
+            project["id"]: group["id"]
+            for group in agent["groups"]
+            for project in group["projects"]
+        }
+        self.assertEqual(reported_assignments, expected_assignments)
 
 
 if __name__ == "__main__":

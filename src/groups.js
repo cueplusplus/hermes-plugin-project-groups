@@ -14,6 +14,11 @@ const RULES = [
 
 const cleanId = value => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
 const cleanName = value => String(value ?? '').trim().replace(/\s+/g, ' ')
+const validGroupName = value => {
+  const name = cleanName(value)
+  if (!name || name.length > 100) throw new Error('Group name must be 1-100 UTF-16 code units')
+  return name
+}
 
 export function normalizeState(input = {}) {
   const groups = []
@@ -49,18 +54,23 @@ export function normalizeState(input = {}) {
 export function createGroup(state, group) {
   const current = normalizeState(state)
   const id = cleanId(group?.id || group?.name)
-  const name = cleanName(group?.name)
+  const name = validGroupName(group?.name)
 
-  if (!id || !name) throw new Error('Group name is required')
+  if (!id) throw new Error('Group name is required')
   if (current.groups.some(item => item.id === id)) throw new Error(`Group already exists: ${id}`)
+  if (current.groups.some(item => item.name.toLowerCase() === name.toLowerCase())) {
+    throw new Error(`Group already exists: ${name}`)
+  }
 
   return { ...current, groups: [...current.groups, { id, name, collapsed: false }] }
 }
 
 export function renameGroup(state, groupId, name) {
   const current = normalizeState(state)
-  const nextName = cleanName(name)
-  if (!nextName) throw new Error('Group name is required')
+  const nextName = validGroupName(name)
+  if (current.groups.some(group => group.id !== groupId && group.name.toLowerCase() === nextName.toLowerCase())) {
+    throw new Error(`Group already exists: ${nextName}`)
+  }
 
   return {
     ...current,

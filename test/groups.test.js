@@ -106,3 +106,16 @@ test('normalizeState repairs malformed and dangling persisted data', () => {
   assert.deepEqual(state.groups, [{ id: 'cue', name: 'CUE++', collapsed: false }])
   assert.deepEqual(state.assignments, { a: 'cue' })
 })
+
+test('createGroup enforces authoritative name normalization rules', () => {
+  const state = normalizeState({ groups: [{ id: 'one', name: 'Alpha' }] })
+
+  assert.throws(
+    () => createGroup(state, { id: 'two', name: '  alpha  ' }),
+    /already exists/i
+  )
+  assert.throws(
+    () => createGroup(state, { id: 'emoji', name: '😀'.repeat(51) }),
+    /1-100 UTF-16/
+  )
+})

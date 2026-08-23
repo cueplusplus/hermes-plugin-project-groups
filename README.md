@@ -1,20 +1,18 @@
 # Hermes Project Groups
 
-A shareable runtime plugin for **Hermes Desktop** that organizes flat Hermes Projects into collapsible groups without changing project repositories or Hermes core.
+A shareable Hermes plugin that organizes flat Projects into collapsible groups in Desktop's native **PROJECTS** section without changing repositories or Project identity.
 
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
 ## Features
 
-- Adds a native-looking **Project Groups** page and sidebar navigation row.
-- Seeds CUE++, RGC-LABS, and RGC Legacy groups from Project paths/names.
-- Create, rename, collapse, and delete groups.
-- Assign or unassign Projects through a group picker.
-- Activate a Project through Hermes's existing `projects.set_active` RPC.
-- Stores group metadata in the plugin's namespaced Desktop storage.
-- Leaves the canonical Hermes Project database and repositories untouched.
-
-> Hermes Desktop does not currently expose a contribution slot inside its built-in Projects list. This plugin therefore provides a dedicated grouped page. A future version can adopt an upstream Projects presentation slot if Hermes adds one.
+- Contributes one stable `projects.grouping` provider to the existing native Projects list.
+- Creates groups through Hermes's native folder-plus dialog.
+- Assigns and unassigns Projects through each native Project menu.
+- Persists collapse state, group order, and membership per active backend/profile.
+- Keeps native Project rows, activation, sessions, worktrees, menus, and appearance core-owned.
+- Leaves the canonical Hermes Project database, repositories, and filesystem paths untouched.
+- Preserves CUE++, RGC-LABS, and RGC Legacy defaults when migrating an existing local cache.
 
 ## Requirements
 
@@ -23,7 +21,7 @@ A shareable runtime plugin for **Hermes Desktop** that organizes flat Hermes Pro
 
 ## Install
 
-> Requires a Hermes build with unified Desktop plugins and backend plugin APIs (current 2026 Desktop line). Native inline sidebar grouping additionally requires the upstream `projects.presentation` SDK contribution proposed in [NousResearch/hermes-agent#93229](https://github.com/NousResearch/hermes-agent/pull/93229); older builds still get the dedicated Project Groups page.
+Requires a Hermes build with unified Desktop plugins, backend plugin APIs, and the native `projects.grouping` contribution contract. There is intentionally no standalone route, navigation item, or Project Groups page.
 
 ### One-click Desktop install
 
@@ -58,13 +56,7 @@ npm test
 npm run check
 ```
 
-The runtime plugin is plain ESM and has no build step. Its only runtime imports are the SDK-supported modules:
-
-- `@hermes/plugin-sdk`
-- `react`
-- `react/jsx-runtime`
-
-The reusable grouping rules in `src/groups.js` are covered by Node's built-in test runner.
+The Desktop entrypoint is plain, dependency-free ESM with no build step. `plugin.js` and `desktop/plugin.js` are kept byte-identical. Tests cover the reusable grouping rules, authoritative backend mutations, provider publication semantics, offline behavior, migration, and process reloads.
 
 ## Agent and LLM awareness
 
@@ -86,14 +78,14 @@ The preferred persistence path is the plugin's profile-scoped backend:
 $HERMES_HOME/project-groups/state.json
 ```
 
-Writes are validated, bounded, and atomic. The Desktop copy under `hermes.plugin.project-groups.state.v1` is retained as an offline/older-backend fallback and migration source. Project IDs and filesystem paths are backend/profile-specific, so a local Project and a remote Project remain distinct records even when they share an organization group name.
+Writes are lock-protected, validated, bounded, and atomic. Create, assign/unassign, and collapse mutations succeed on the backend before Desktop updates its cache or publishes a new snapshot. The Desktop copy under `hermes.plugin.project-groups.state.v1` is a read-only offline fallback and one-time migration source; it is never an offline write authority. Project IDs and filesystem paths are backend/profile-specific, so local and remote Projects remain distinct even when they share a group label.
 
 ## Current limitations
 
-- Groups appear on the plugin page, not inline within the built-in Projects list. An upstream `projects.presentation` contribution seam is being prepared.
+- Desktop builds without `projects.grouping` cannot render the native grouping provider; no duplicate page fallback is registered.
 - Cross-gateway organization identity is not merged automatically; each backend/profile owns its Project assignments.
-- Project ordering currently uses accessible up/down controls; pointer drag-and-drop is planned after the native presentation seam lands.
-- The plugin relies on current `projects.*` JSON-RPC methods and degrades to local storage if the backend API is unavailable.
+- Nested groups and grouped drag-reordering are outside the v1 native contract.
+- When the backend is unavailable, the last cache remains visible but create, move, and collapse controls are unavailable.
 
 ## License
 

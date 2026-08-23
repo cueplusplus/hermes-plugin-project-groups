@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import os
 import tempfile
 import unittest
@@ -50,7 +51,85 @@ class ProjectGroupsApiTest(unittest.TestCase):
 
     def test_rejects_oversized_group_name(self):
         with self.assertRaisesRegex(ValueError, "group name"):
-            module.normalize_state({"groups": [{"id": "cue", "name": "x" * 201}]})
+            module.normalize_state({"groups": [{"id": "cue", "name": "x" * 101}]})
+
+    def test_group_names_use_utf16_limit(self):
+        with self.assertRaisesRegex(ValueError, "group name"):
+            module.normalize_state({"groups": [{"id": "emoji", "name": "😀" * 51}]})
+
+    def test_authoritative_mutations_persist_and_return_current_state(self):
+        created = asyncio.run(module.create_group(module.CreateGroupEnvelope(name="  Product   Design  ")))
+        group_id = created["state"]["groups"][0]["id"]
+        self.assertEqual(created["state"]["groups"][0]["name"], "Product Design")
+
+        assigned = asyncio.run(module.assign_project(module.AssignProjectEnvelope(
+            project_id="project-1",
+            group_id=group_id,
+        )))
+        self.assertEqual(assigned["state"]["assignments"], {"project-1": group_id})
+
+        collapsed = asyncio.run(module.set_group_collapsed(module.CollapseGroupEnvelope(
+            group_id=group_id,
+            collapsed=True,
+        )))
+        self.assertTrue(collapsed["state"]["groups"][0]["collapsed"])
+
+        unassigned = asyncio.run(module.assign_project(module.AssignProjectEnvelope(
+            project_id="project-1",
+            group_id=None,
+        )))
+        self.assertEqual(unassigned["state"]["assignments"], {})
+        self.assertEqual(module._read_state(), unassigned["state"])
+
+    def test_create_group_rejects_case_insensitive_duplicate(self):
+        asyncio.run(module.create_group(module.CreateGroupEnvelope(name="CUE++")))
+
+        with self.assertRaises(module.HTTPException) as raised:
+            asyncio.run(module.create_group(module.CreateGroupEnvelope(name="  cue++ ")))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual([group["name"] for group in module._read_state()["groups"]], ["CUE++"])
+
+    def test_migration_is_one_time_and_preserves_legacy_state(self):
+        legacy = {
+            "groups": [{"id": "cue", "name": " CUE++ ", "collapsed": True}],
+            "assignments": {"p1": "cue"},
+            "projectOrder": {"cue": ["p1"]},
+        }
+        migrated = asyncio.run(module.migrate_state(module.StateEnvelope(state=legacy)))
+        self.assertEqual(migrated["state"]["assignments"], {"p1": "cue"})
+
+        existing = asyncio.run(module.migrate_state(module.StateEnvelope(state={
+            "groups": [{"id": "other", "name": "Other"}],
+        })))
+        self.assertEqual(existing["state"], migrated["state"])
+
+    def test_mutations_cannot_cross_persisted_collection_bounds(self):
+        original_groups = module._MAX_GROUPS
+        original_assignments = module._MAX_ASSIGNMENTS
+        module._MAX_GROUPS = 1
+        module._MAX_ASSIGNMENTS = 1
+        try:
+            state = module.normalize_state({
+                "groups": [{"id": "cue", "name": "CUE++"}],
+                "assignments": {"p1": "cue"},
+            })
+            module._atomic_write(module._state_path(), state)
+
+            with self.assertRaises(module.HTTPException) as group_error:
+                asyncio.run(module.create_group(module.CreateGroupEnvelope(name="Other")))
+            self.assertEqual(group_error.exception.status_code, 422)
+
+            with self.assertRaises(module.HTTPException) as assignment_error:
+                asyncio.run(module.assign_project(module.AssignProjectEnvelope(
+                    project_id="p2",
+                    group_id="cue",
+                )))
+            self.assertEqual(assignment_error.exception.status_code, 422)
+            self.assertEqual(module._read_state(), state)
+        finally:
+            module._MAX_GROUPS = original_groups
+            module._MAX_ASSIGNMENTS = original_assignments
 
 
 if __name__ == "__main__":

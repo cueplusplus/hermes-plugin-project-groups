@@ -1,7 +1,7 @@
 ---
 name: project-groups
 description: "Use when choosing or explaining Hermes Project groups."
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Hermes Project Groups
@@ -17,6 +17,7 @@ Project Groups are an organizational layer over Hermes Projects. A **Project** r
 5. Local and remote Hermes profiles have independent Project IDs and assignments. A shared group label such as `CUE++` does not make local and remote Project records identical.
 6. To work in a Project, use its actual primary path or the ordinary Hermes Project controls. The group itself is not a working directory.
 7. If backend state is unavailable, say the grouping data could not be retrieved; do not reconstruct it from memory as if authoritative.
+8. Group create, move/unassign, and collapse operations are handled by native Desktop controls and persist to the active backend before the sidebar changes. The agent tools are read-only.
 
 ## Model
 
@@ -29,4 +30,4 @@ Project Group (presentation/organization)
     └── optional board
 ```
 
-The Desktop plugin currently provides a dedicated grouped page. Newer Hermes builds may also render the same data through the native Projects presentation contribution area.
+The Desktop plugin contributes one `projects.grouping` provider to Hermes's existing **PROJECTS** section. Hermes continues to own Project rows, activation, sessions, worktrees, menus, and the synthetic Home/Ungrouped presentation.

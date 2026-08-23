@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +23,16 @@ except ImportError:  # Allows pure state tests without dashboard dependencies.
         def get(self, *_args, **_kwargs):
             return lambda fn: fn
 
+        def post(self, *_args, **_kwargs):
+            return lambda fn: fn
+
         def put(self, *_args, **_kwargs):
             return lambda fn: fn
 
     class BaseModel:
-        pass
+        def __init__(self, **values):
+            for key, value in values.items():
+                setattr(self, key, value)
 
 try:
     from hermes_constants import get_hermes_home
@@ -42,22 +48,41 @@ _MAX_GROUPS = 200
 _MAX_ASSIGNMENTS = 20_000
 _MAX_ORDER = 20_000
 _MAX_TEXT = 200
+_MAX_GROUP_NAME = 100
 
 
 class StateEnvelope(BaseModel):
     state: dict[str, Any]
 
 
+class CreateGroupEnvelope(BaseModel):
+    name: str
+
+
+class AssignProjectEnvelope(BaseModel):
+    project_id: str
+    group_id: str | None = None
+
+
+class CollapseGroupEnvelope(BaseModel):
+    group_id: str
+    collapsed: bool
+
+
 def _state_path() -> Path:
     return get_hermes_home() / "project-groups" / "state.json"
 
 
-def _clean_text(value: Any, *, field: str) -> str:
+def _utf16_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _clean_text(value: Any, *, field: str, max_units: int = _MAX_TEXT) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
     text = " ".join(value.strip().split())
-    if not text or len(text) > _MAX_TEXT:
-        raise ValueError(f"{field} must be 1-{_MAX_TEXT} characters")
+    if not text or _utf16_units(text) > max_units:
+        raise ValueError(f"{field} must be 1-{max_units} UTF-16 code units")
     return text
 
 
@@ -67,16 +92,19 @@ def normalize_state(raw: Any) -> dict[str, Any]:
 
     groups: list[dict[str, Any]] = []
     group_ids: set[str] = set()
+    group_names: set[str] = set()
     for item in raw.get("groups", []):
         if len(groups) >= _MAX_GROUPS:
             raise ValueError(f"groups exceeds {_MAX_GROUPS}")
         if not isinstance(item, dict):
             continue
         group_id = _clean_text(item.get("id"), field="group id")
-        name = _clean_text(item.get("name"), field="group name")
-        if group_id in group_ids:
+        name = _clean_text(item.get("name"), field="group name", max_units=_MAX_GROUP_NAME)
+        folded_name = name.casefold()
+        if group_id in group_ids or folded_name in group_names:
             continue
         group_ids.add(group_id)
+        group_names.add(folded_name)
         groups.append({"id": group_id, "name": name, "collapsed": item.get("collapsed") is True})
 
     assignments: dict[str, str] = {}
@@ -146,18 +174,102 @@ def _read_state() -> dict[str, Any] | None:
         raise HTTPException(status_code=500, detail=f"Stored Project Groups state is invalid: {exc}") from exc
 
 
+def _empty_state() -> dict[str, Any]:
+    return {"version": _SCHEMA_VERSION, "groups": [], "assignments": {}, "projectOrder": {}}
+
+
+def _response(state: dict[str, Any]) -> dict[str, Any]:
+    return {"state": state, "storage": "backend", "version": _SCHEMA_VERSION}
+
+
+def _validation_error(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(exc))
+
+
 @router.get("/state")
 async def get_state():
     with _LOCK:
-        return {"state": _read_state(), "storage": "backend", "version": _SCHEMA_VERSION}
-
-
-@router.put("/state")
-async def put_state(envelope: StateEnvelope):
-    try:
-        state = normalize_state(envelope.state)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    with _LOCK:
-        _atomic_write(_state_path(), state)
+        state = _read_state()
     return {"state": state, "storage": "backend", "version": _SCHEMA_VERSION}
+
+
+@router.post("/state/migrate")
+async def migrate_state(envelope: StateEnvelope):
+    try:
+        migrated = normalize_state(envelope.state)
+    except ValueError as exc:
+        raise _validation_error(exc) from exc
+    with _LOCK:
+        current = _read_state()
+        if current is None:
+            current = migrated
+            _atomic_write(_state_path(), current)
+    return _response(current)
+
+
+@router.post("/groups")
+async def create_group(envelope: CreateGroupEnvelope):
+    try:
+        name = _clean_text(envelope.name, field="group name", max_units=_MAX_GROUP_NAME)
+    except ValueError as exc:
+        raise _validation_error(exc) from exc
+
+    with _LOCK:
+        current = _read_state() or _empty_state()
+        if any(group["name"].casefold() == name.casefold() for group in current["groups"]):
+            raise HTTPException(status_code=409, detail=f"Project group already exists: {name}")
+        if len(current["groups"]) >= _MAX_GROUPS:
+            raise HTTPException(status_code=422, detail=f"groups exceeds {_MAX_GROUPS}")
+        group_id = f"group-{uuid.uuid4().hex}"
+        current = {
+            **current,
+            "groups": [*current["groups"], {"id": group_id, "name": name, "collapsed": False}],
+        }
+        _atomic_write(_state_path(), current)
+    return _response(current)
+
+
+@router.put("/assign")
+async def assign_project(envelope: AssignProjectEnvelope):
+    try:
+        project_id = _clean_text(envelope.project_id, field="project id")
+        group_id = None if envelope.group_id is None else _clean_text(envelope.group_id, field="group id")
+    except ValueError as exc:
+        raise _validation_error(exc) from exc
+
+    with _LOCK:
+        current = _read_state() or _empty_state()
+        if group_id is not None and not any(group["id"] == group_id for group in current["groups"]):
+            raise HTTPException(status_code=404, detail=f"Unknown Project group: {group_id}")
+        assignments = dict(current["assignments"])
+        if group_id is None:
+            assignments.pop(project_id, None)
+        else:
+            if project_id not in assignments and len(assignments) >= _MAX_ASSIGNMENTS:
+                raise HTTPException(status_code=422, detail=f"assignments exceeds {_MAX_ASSIGNMENTS}")
+            assignments[project_id] = group_id
+        current = {**current, "assignments": assignments}
+        _atomic_write(_state_path(), current)
+    return _response(current)
+
+
+@router.put("/groups/collapsed")
+async def set_group_collapsed(envelope: CollapseGroupEnvelope):
+    try:
+        group_id = _clean_text(envelope.group_id, field="group id")
+    except ValueError as exc:
+        raise _validation_error(exc) from exc
+
+    with _LOCK:
+        current = _read_state() or _empty_state()
+        if not any(group["id"] == group_id for group in current["groups"]):
+            raise HTTPException(status_code=404, detail=f"Unknown Project group: {group_id}")
+        current = {
+            **current,
+            "groups": [
+                {**group, "collapsed": envelope.collapsed} if group["id"] == group_id else group
+                for group in current["groups"]
+            ],
+        }
+        _atomic_write(_state_path(), current)
+    return _response(current)

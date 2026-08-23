@@ -1,9 +1,9 @@
 {
   "name": "project-groups",
   "label": "Project Groups",
-  "description": "Profile-scoped persistence backend for the Hermes Desktop Project Groups plugin.",
+  "description": "Authoritative profile-scoped persistence for native Hermes Project grouping.",
   "icon": "FolderTree",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "tab": {
     "path": "/project-groups-backend",
     "hidden": true

@@ -1,7 +1,7 @@
 {
   "name": "hermes-plugin-project-groups",
-  "version": "0.2.0",
-  "description": "Group Hermes Desktop Projects into collapsible organization folders.",
+  "version": "0.3.0",
+  "description": "Group Hermes Projects in the native Desktop sidebar.",
   "type": "module",
   "private": false,
   "scripts": {
