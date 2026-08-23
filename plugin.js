@@ -60,8 +60,10 @@ function normalizeState(input = {}) {
 
   const projectOrder = {}
   const rawOrder = source?.projectOrder && typeof source.projectOrder === 'object' ? source.projectOrder : {}
-  for (const [groupId, rawProjectIds] of Object.entries(rawOrder)) {
-    if (!groupIds.has(groupId) || !Array.isArray(rawProjectIds)) continue
+  for (const [rawGroupId, rawProjectIds] of Object.entries(rawOrder)) {
+    const groupId = cleanText(rawGroupId)
+    const isSyntheticGroup = groupId === '__ungrouped__'
+    if ((!groupIds.has(groupId) && !isSyntheticGroup) || !Array.isArray(rawProjectIds)) continue
     const seen = new Set()
     projectOrder[groupId] = rawProjectIds.flatMap(rawProjectId => {
       const projectId = cleanText(rawProjectId)
@@ -101,7 +103,8 @@ function normalizeLegacyState(input = {}) {
   const projectOrder = {}
   const rawOrder = source?.projectOrder && typeof source.projectOrder === 'object' ? source.projectOrder : {}
   for (const [rawGroupId, rawProjectIds] of Object.entries(rawOrder)) {
-    const groupId = idAliases.get(cleanText(rawGroupId))
+    const cleanGroupId = cleanText(rawGroupId)
+    const groupId = cleanGroupId === '__ungrouped__' ? cleanGroupId : idAliases.get(cleanGroupId)
     if (!groupId || !Array.isArray(rawProjectIds)) continue
     const seen = new Set(projectOrder[groupId] ?? [])
     projectOrder[groupId] = [...seen]
@@ -116,7 +119,7 @@ function normalizeLegacyState(input = {}) {
   return { version: 1, groups, assignments, projectOrder }
 }
 
-function toSnapshot(state) {
+function toSnapshot(state, revision) {
   const groups = state.groups.map(group => {
     const assigned = Object.entries(state.assignments)
       .filter(([, groupId]) => groupId === group.id)
@@ -131,7 +134,7 @@ function toSnapshot(state) {
       projectIds: Object.freeze([...ordered, ...assigned.filter(projectId => !orderedSet.has(projectId))])
     })
   })
-  return Object.freeze({ groups: Object.freeze(groups) })
+  return Object.freeze({ groups: Object.freeze(groups), revision })
 }
 
 function responseState(response) {
@@ -145,7 +148,8 @@ function createProvider(ctx) {
   const cached = normalizeLegacyState(ctx.storage.get(STORAGE_KEY, { groups: DEFAULT_GROUPS }))
   const listeners = new Set()
   let currentState = cached
-  let snapshot = toSnapshot(cached)
+  let revision = 0
+  let snapshot = toSnapshot(cached, revision)
   let mutationQueue = Promise.resolve()
   let authority = `${host.state.connectionId?.get?.() ?? ''}\u0000${host.state.profile?.get?.() ?? ''}`
   let generation = 0
@@ -158,16 +162,21 @@ function createProvider(ctx) {
     }
   }
 
+  const nextRevision = () => {
+    revision = revision === Number.MAX_SAFE_INTEGER ? 0 : revision + 1
+    return revision
+  }
+
   const publishBackendState = state => {
     currentState = state
     ctx.storage.set(STORAGE_KEY, state)
-    snapshot = toSnapshot(state)
+    snapshot = toSnapshot(state, nextRevision())
     for (const listener of [...listeners]) listener()
   }
 
   const publishTransientState = state => {
     currentState = state
-    snapshot = toSnapshot(state)
+    snapshot = toSnapshot(state, nextRevision())
     for (const listener of [...listeners]) listener()
   }
 

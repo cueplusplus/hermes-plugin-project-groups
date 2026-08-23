@@ -5,12 +5,19 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
 spec = importlib.util.spec_from_file_location("project_groups_api", MODULE_PATH)
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+AGENT_MODULE_PATH = Path(__file__).resolve().parents[1] / "__init__.py"
+agent_spec = importlib.util.spec_from_file_location("project_groups_agent", AGENT_MODULE_PATH)
+assert agent_spec is not None and agent_spec.loader is not None
+agent_module = importlib.util.module_from_spec(agent_spec)
+agent_spec.loader.exec_module(agent_module)
 
 
 class ProjectGroupsApiTest(unittest.TestCase):
@@ -128,13 +135,20 @@ class ProjectGroupsApiTest(unittest.TestCase):
                 "long": ["projectLong"],
                 "duplicate-1": ["projectOne"],
                 "duplicate-2": ["projectTwo"],
+                "__ungrouped__": ["projectTwo", "projectLong"],
             },
         }
         path = module._state_path()
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(legacy), encoding="utf-8")
 
-        repaired = module._read_state()
+        with mock.patch.object(module, "_atomic_write", wraps=module._atomic_write) as atomic_write:
+            repaired = module._read_state()
+
+            atomic_write.assert_called_once_with(path, repaired)
+            self.assertEqual(agent_module._load_state(), repaired)
+            self.assertEqual(module._read_state(), repaired)
+            atomic_write.assert_called_once()
 
         self.assertEqual([(group["id"], group["name"]) for group in repaired["groups"]], [
             ("long", "L" * 100),
@@ -143,7 +157,19 @@ class ProjectGroupsApiTest(unittest.TestCase):
         ])
         self.assertEqual(repaired["assignments"], legacy["assignments"])
         self.assertEqual(repaired["projectOrder"], legacy["projectOrder"])
-        self.assertEqual(module._read_state(), repaired)
+
+    def test_read_does_not_rewrite_unchanged_canonical_state(self):
+        state = module.normalize_state({
+            "groups": [{"id": "cue", "name": "CUE++"}],
+            "assignments": {"p1": "cue"},
+            "projectOrder": {"cue": ["p1"], "__ungrouped__": ["p2"]},
+        })
+        module._atomic_write(module._state_path(), state)
+
+        with mock.patch.object(module, "_atomic_write", wraps=module._atomic_write) as atomic_write:
+            self.assertEqual(module._read_state(), state)
+
+        atomic_write.assert_not_called()
 
     def test_mutations_cannot_cross_persisted_collection_bounds(self):
         original_groups = module._MAX_GROUPS

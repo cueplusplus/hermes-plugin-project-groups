@@ -149,6 +149,75 @@ test('reloads state and mutation authority when the active profile changes A to 
   fixture.dispose()
 })
 
+test('publishes capability-only profile changes through the grouping snapshot revision', async () => {
+  const backend = state({ p1: 'cue' })
+  host.state.gateway.set('open')
+  host.state.profile.set('read-only')
+  const fixture = context({ backend })
+  fixture.ctx.rest = async path => {
+    if (path === '/state') return { state: backend, storage: 'backend', version: 1 }
+    if (path === '/capabilities') {
+      return {
+        mutations: host.state.profile.get() === 'mutable' ? ['createGroup', 'assignProject', 'setGroupCollapsed'] : [],
+        version: 1
+      }
+    }
+    throw new Error(`Unexpected REST request: ${path}`)
+  }
+
+  plugin.register(fixture.ctx)
+  const provider = fixture.registrations[0].data
+  await tick()
+  const readOnlySnapshot = provider.getSnapshot()
+  assert.equal(provider.assignProject, undefined)
+  assert.equal(Number.isSafeInteger(readOnlySnapshot.revision), true)
+
+  host.state.profile.set('mutable')
+  await tick()
+  const mutableSnapshot = provider.getSnapshot()
+  assert.deepEqual(mutableSnapshot.groups, readOnlySnapshot.groups)
+  assert.ok(mutableSnapshot.revision > readOnlySnapshot.revision)
+  assert.equal(typeof provider.assignProject, 'function')
+  fixture.dispose()
+})
+
+test('publishes disconnected to connected capability restoration and the reverse', async () => {
+  const backend = state({ p1: 'cue' })
+  let connected = false
+  host.state.gateway.set('closed')
+  const fixture = context({ backend, cached: backend })
+  fixture.ctx.rest = async path => {
+    if (!connected) throw new Error('offline')
+    if (path === '/state') return { state: backend, storage: 'backend', version: 1 }
+    if (path === '/capabilities') {
+      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed'], version: 1 }
+    }
+    throw new Error(`Unexpected REST request: ${path}`)
+  }
+
+  plugin.register(fixture.ctx)
+  const provider = fixture.registrations[0].data
+  await tick()
+  const disconnectedSnapshot = provider.getSnapshot()
+  assert.equal(provider.assignProject, undefined)
+  assert.equal(Number.isSafeInteger(disconnectedSnapshot.revision), true)
+
+  connected = true
+  host.state.gateway.set('open')
+  await tick()
+  const connectedSnapshot = provider.getSnapshot()
+  assert.deepEqual(connectedSnapshot.groups, disconnectedSnapshot.groups)
+  assert.ok(connectedSnapshot.revision > disconnectedSnapshot.revision)
+  assert.equal(typeof provider.assignProject, 'function')
+
+  host.state.gateway.set('closed')
+  const reDisconnectedSnapshot = provider.getSnapshot()
+  assert.deepEqual(reDisconnectedSnapshot.groups, connectedSnapshot.groups)
+  assert.ok(reDisconnectedSnapshot.revision > connectedSnapshot.revision)
+  assert.equal(provider.assignProject, undefined)
+  fixture.dispose()
+})
+
 test('ignores a delayed Profile A load after switching to Profile B', async () => {
   let resolveProfileA
   const profileA = new Promise(resolve => {
@@ -328,7 +397,8 @@ test('repairs v0.2 cache names and duplicate labels without losing groups or ass
     projectOrder: {
       long: ['projectLong'],
       'duplicate-1': ['projectOne'],
-      'duplicate-2': ['projectTwo']
+      'duplicate-2': ['projectTwo'],
+      __ungrouped__: ['projectTwo', 'projectLong']
     }
   }
   const fixture = context({ backend: null, cached: legacy })

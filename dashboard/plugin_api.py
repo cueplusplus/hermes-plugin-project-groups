@@ -168,10 +168,11 @@ def normalize_state(raw: Any, *, repair_legacy: bool = False) -> dict[str, Any]:
     if isinstance(raw_order, dict):
         total = 0
         for raw_group_id, project_ids in raw_order.items():
+            clean_group_id = " ".join(raw_group_id.strip().split()) if isinstance(raw_group_id, str) else raw_group_id
             group_id = (
-                id_aliases.get(" ".join(raw_group_id.strip().split()))
-                if repair_legacy and isinstance(raw_group_id, str)
-                else raw_group_id
+                "__ungrouped__"
+                if clean_group_id == "__ungrouped__"
+                else id_aliases.get(clean_group_id) if repair_legacy else raw_group_id
             )
             if group_id not in group_ids and group_id != "__ungrouped__":
                 continue
@@ -217,13 +218,18 @@ def _atomic_write(path: Path, state: dict[str, Any]) -> None:
 
 
 def _read_state() -> dict[str, Any] | None:
-    path = _state_path()
-    if not path.exists():
-        return None
-    try:
-        return normalize_state(json.loads(path.read_text(encoding="utf-8")), repair_legacy=True)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=f"Stored Project Groups state is invalid: {exc}") from exc
+    with _LOCK:
+        path = _state_path()
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            state = normalize_state(raw, repair_legacy=True)
+            if state != raw:
+                _atomic_write(path, state)
+            return state
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"Stored Project Groups state is invalid: {exc}") from exc
 
 
 def _empty_state() -> dict[str, Any]:
