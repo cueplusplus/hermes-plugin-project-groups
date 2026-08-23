@@ -1,0 +1,643 @@
+From 558adb966ccf370b31930e8a83bdac4a1e12b740 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 02:23:49 +0300
+Subject: [PATCH 7/9] fix(desktop): reconcile grouped project materialization
+
+---
+ .../sidebar/projects-presentation.test.ts     |  53 +++++
+ .../app/chat/sidebar/projects-presentation.ts |  14 +-
+ .../sidebar/projects/project-menu.test.tsx    | 104 +++++++++-
+ .../chat/sidebar/projects/project-menu.tsx    |  12 +-
+ apps/desktop/src/store/projects.test.ts       | 112 +++++++++++
+ apps/desktop/src/store/projects.ts            | 188 ++++++++++++++++--
+ 6 files changed, 456 insertions(+), 27 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index c4c14a1c9..2abb16aa8 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -158,4 +158,57 @@ describe('Projects grouping contribution', () => {
+ 
+     expect(result.current?.snapshot.groups).toEqual([{ id: 'two', label: 'two', projectIds: ['a'] }])
+   })
++
++  it.each([
++    ['opaque-token', 'opaque-token'],
++    [0, 0]
++  ])('retains a valid opaque snapshot revision %#', (revision, expected) => {
++    register({
++      getSnapshot: () => ({ groups: [], revision }),
++      subscribe: () => () => undefined
++    })
++
++    expect(resolveProjectsGrouping([])?.snapshot).toEqual({ groups: [], revision: expected })
++  })
++
++  it.each([true, null, {}, [], Number.NaN, Number.POSITIVE_INFINITY])(
++    'ignores a malformed snapshot revision %# without rejecting the provider',
++    revision => {
++      register({
++        getSnapshot: () => ({ groups: [{ id: 'one', label: 'One', projectIds: ['a'] }], revision }),
++        subscribe: () => () => undefined
++      })
++
++      expect(resolveProjectsGrouping([project('a')])?.snapshot).toEqual({
++        groups: [{ id: 'one', label: 'One', projectIds: ['a'] }]
++      })
++    }
++  )
++
++  it('publishes a new cache identity when only the provider revision changes', () => {
++    let revision: number | string = 1
++    let listener: (() => void) | undefined
++    const contribution: ProjectsGroupingContribution = {
++      getSnapshot: () => ({ groups: [{ id: 'one', label: 'One', projectIds: ['a'] }], revision }),
++      subscribe: onChange => {
++        listener = onChange
++        return () => undefined
++      }
++    }
++    register(contribution)
++
++    const { result } = renderHook(() => useActiveProjectsGrouping())
++    const initial = result.current?.snapshot
++
++    act(() => {
++      revision = 'capability-added'
++      listener?.()
++    })
++
++    expect(result.current?.snapshot).not.toBe(initial)
++    expect(result.current?.snapshot).toEqual({
++      groups: [{ id: 'one', label: 'One', projectIds: ['a'] }],
++      revision: 'capability-added'
++    })
++  })
+ })
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index fd6368069..5c61ab241 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -16,6 +16,8 @@ export interface ProjectGroupDescriptor {
+ 
+ export interface ProjectsGroupingSnapshot {
+   readonly groups: readonly ProjectGroupDescriptor[]
++  /** Opaque provider state identity for capability changes not represented by groups. */
++  readonly revision?: number | string
+ }
+ 
+ export interface ProjectsGroupingContribution {
+@@ -73,7 +75,10 @@ function sanitizeSnapshot(value: unknown): ProjectsGroupingSnapshot | null {
+     })
+   }
+ 
+-  return { groups }
++  const revision = (value as { revision?: unknown }).revision
++  const validRevision = typeof revision === 'string' || (typeof revision === 'number' && Number.isFinite(revision))
++
++  return { groups, ...(validRevision && { revision }) }
+ }
+ 
+ function readValidProvider(): {
+@@ -146,7 +151,12 @@ const NULL_SNAPSHOT = () => null
+ 
+ function snapshotsEqual(left: ProjectsGroupingSnapshot, right: ProjectsGroupingSnapshot): boolean {
+   if (left === right) return true
+-  if (!Array.isArray(left.groups) || !Array.isArray(right.groups) || left.groups.length !== right.groups.length) {
++  if (
++    left.revision !== right.revision ||
++    !Array.isArray(left.groups) ||
++    !Array.isArray(right.groups) ||
++    left.groups.length !== right.groups.length
++  ) {
+     return false
+   }
+ 
+diff --git a/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx b/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx
+index e83f01828..a2832b843 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx
+@@ -44,6 +44,7 @@ vi.mock('@/i18n', () => ({
+           menuDelete: 'Delete',
+           menuRename: 'Rename',
+           menuSetActive: 'Set active',
++          groupUpdateFailed: 'Could not update Project group.',
+           moveToGroup: 'Move to group',
+           noColor: 'No color',
+           removeFromSidebar: 'Remove from sidebar',
+@@ -79,6 +80,10 @@ vi.mock('@/store/projects', () => ({
+   setProjectAppearance: vi.fn().mockResolvedValue(false)
+ }))
+ 
++vi.mock('@/store/notifications', () => ({
++  notifyError: vi.fn()
++}))
++
+ const project = {
+   color: null,
+   icon: null,
+@@ -91,6 +96,8 @@ const project = {
+ const projectsStore = await import('@/store/projects')
+ const materializeAutoProject = vi.mocked(projectsStore.materializeAutoProject)
+ const setProjectAppearance = vi.mocked(projectsStore.setProjectAppearance)
++const notifications = await import('@/store/notifications')
++const notifyError = vi.mocked(notifications.notifyError)
+ 
+ const tipTrigger = (el: HTMLElement) => el.closest('[data-slot="tooltip-trigger"]')
+ 
+@@ -138,7 +145,15 @@ describe('ProjectMenu', () => {
+     let snapshot = { groups: [{ id: 'cue', label: 'CUE++', projectIds: [] as string[] }] }
+     const assignProject = vi.fn(async (projectId: string, groupId: string | null) => {
+       snapshot = {
+-        groups: [{ ...snapshot.groups[0], projectIds: groupId === 'cue' ? [projectId] : [] }]
++        groups: [
++          {
++            ...snapshot.groups[0],
++            projectIds: [
++              ...snapshot.groups[0].projectIds.filter(id => id !== projectId),
++              ...(groupId === 'cue' ? [projectId] : [])
++            ]
++          }
++        ]
+       }
+     })
+     const contribution: ProjectsGroupingContribution = {
+@@ -167,4 +182,91 @@ describe('ProjectMenu', () => {
+     await waitFor(() => expect(setProjectAppearance).toHaveBeenCalledWith(adoptedProject, { color: null }))
+     expect(snapshot.groups[0].projectIds).toEqual(['p_stable'])
+   }, 15000)
++
++  it('migrates legacy path-id membership to the stable Project even when the chosen group is unchanged', async () => {
++    const autoProject = { ...project, id: '/repo', isAuto: true }
++    const adoptedProject = { ...project, id: 'p_stable', isAuto: false }
++    let snapshot = { groups: [{ id: 'cue', label: 'CUE++', projectIds: ['/repo'] }] }
++    const assignProject = vi.fn(async (projectId: string, groupId: string | null) => {
++      snapshot = {
++        groups: snapshot.groups.map(group => ({
++          ...group,
++          projectIds: [...group.projectIds.filter(id => id !== projectId), ...(group.id === groupId ? [projectId] : [])]
++        }))
++      }
++    })
++    const contribution: ProjectsGroupingContribution = {
++      assignProject,
++      getSnapshot: () => snapshot,
++      subscribe: () => () => undefined
++    }
++    disposers.push(registry.register({ area: PROJECTS_GROUPING_AREA, data: contribution, id: 'groups' }))
++    materializeAutoProject.mockResolvedValue(adoptedProject as never)
++
++    render(<ProjectMenu isActive={false} project={autoProject} />)
++    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
++    fireEvent.pointerMove(await screen.findByRole('menuitem', { name: 'Move to group' }), { pointerType: 'mouse' })
++    fireEvent.pointerEnter(screen.getByRole('menuitem', { name: 'Move to group' }), { pointerType: 'mouse' })
++    fireEvent.click(await screen.findByRole('menuitem', { name: 'CUE++' }))
++
++    await waitFor(() => expect(assignProject).toHaveBeenCalledTimes(2))
++    expect(assignProject.mock.calls).toEqual([
++      ['p_stable', 'cue'],
++      ['/repo', null]
++    ])
++    expect(snapshot.groups[0].projectIds).toEqual(['p_stable'])
++  }, 15000)
++
++  it('clears stable and legacy path ids when an auto Project is moved to Ungrouped', async () => {
++    const autoProject = { ...project, id: '/repo', isAuto: true }
++    const adoptedProject = { ...project, id: 'p_stable', isAuto: false }
++    const assignProject = vi.fn().mockResolvedValue(undefined)
++    const contribution: ProjectsGroupingContribution = {
++      assignProject,
++      getSnapshot: () => ({ groups: [{ id: 'cue', label: 'CUE++', projectIds: ['/repo'] }] }),
++      subscribe: () => () => undefined
++    }
++    disposers.push(registry.register({ area: PROJECTS_GROUPING_AREA, data: contribution, id: 'groups' }))
++    materializeAutoProject.mockResolvedValue(adoptedProject as never)
++
++    render(<ProjectMenu isActive={false} project={autoProject} />)
++    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
++    fireEvent.pointerMove(await screen.findByRole('menuitem', { name: 'Move to group' }), { pointerType: 'mouse' })
++    fireEvent.pointerEnter(screen.getByRole('menuitem', { name: 'Move to group' }), { pointerType: 'mouse' })
++    fireEvent.click(await screen.findByRole('menuitem', { name: 'Ungrouped' }))
++
++    await waitFor(() => expect(assignProject).toHaveBeenCalledTimes(2))
++    expect(assignProject.mock.calls).toEqual([
++      ['p_stable', null],
++      ['/repo', null]
++    ])
++  }, 15000)
++
++  it('leaves a provider partial migration visible and reports the failure without fabricating rollback state', async () => {
++    const autoProject = { ...project, id: '/repo', isAuto: true }
++    const adoptedProject = { ...project, id: 'p_stable', isAuto: false }
++    let snapshot = { groups: [{ id: 'cue', label: 'CUE++', projectIds: ['/repo'] }] }
++    const assignProject = vi.fn(async (projectId: string, groupId: string | null) => {
++      if (projectId === '/repo') throw new Error('transient id cleanup failed')
++      snapshot = {
++        groups: [{ ...snapshot.groups[0], projectIds: groupId === 'cue' ? ['/repo', projectId] : ['/repo'] }]
++      }
++    })
++    const contribution: ProjectsGroupingContribution = {
++      assignProject,
++      getSnapshot: () => snapshot,
++      subscribe: () => () => undefined
++    }
++    disposers.push(registry.register({ area: PROJECTS_GROUPING_AREA, data: contribution, id: 'groups' }))
++    materializeAutoProject.mockResolvedValue(adoptedProject as never)
++
++    render(<ProjectMenu isActive={false} project={autoProject} />)
++    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
++    fireEvent.pointerMove(await screen.findByRole('menuitem', { name: 'Move to group' }), { pointerType: 'mouse' })
++    fireEvent.pointerEnter(screen.getByRole('menuitem', { name: 'Move to group' }), { pointerType: 'mouse' })
++    fireEvent.click(await screen.findByRole('menuitem', { name: 'CUE++' }))
++
++    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(expect.any(Error), 'Could not update Project group.'))
++    expect(snapshot.groups[0].projectIds).toEqual(['/repo', 'p_stable'])
++  }, 15000)
+ })
+diff --git a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+index 090772ff1..cfcab0565 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
++++ b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+@@ -67,13 +67,21 @@ function useProjectActions({
+   const claimedGroupId = grouping?.snapshot.groups.find(group => group.projectIds.includes(project.id))?.id ?? null
+ 
+   const assignProject = async (groupId: string | null) => {
+-    if (!grouping?.contribution.assignProject || groupPending || groupId === claimedGroupId) return
++    const assign = grouping?.contribution.assignProject
++    if (!assign || groupPending || (!project.isAuto && groupId === claimedGroupId)) return
+     setGroupPending(true)
+     try {
+       const adopted = project.isAuto ? await materializeAutoProject(project) : null
+       const projectId = project.isAuto ? adopted?.id : project.id
+       if (!projectId) return
+-      await grouping.contribution.assignProject(projectId, groupId)
++
++      // Provider writes are authoritative. Move the durable id first so a
++      // cleanup failure cannot silently ungroup the Project, then retire the
++      // legacy auto/path id. Ungrouped intentionally clears both identities.
++      await assign(projectId, groupId)
++      if (project.isAuto && projectId !== project.id) {
++        await assign(project.id, null)
++      }
+     } catch (error) {
+       notifyError(error, p.groupUpdateFailed)
+     } finally {
+diff --git a/apps/desktop/src/store/projects.test.ts b/apps/desktop/src/store/projects.test.ts
+index 989037060..c4d505aff 100644
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -1,4 +1,5 @@
+ import { atom } from 'nanostores'
++import { JsonRpcGatewayError } from '@hermes/shared'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
+ import { NO_PROJECT_ID, type SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
+@@ -455,9 +456,13 @@ describe('createProject', () => {
+       primary_path: '/repo',
+       slug: 'repo'
+     }
++    let listCalls = 0
+     const request = vi.fn(async (method: string) => {
+       if (method === 'projects.create') return { project: created }
++      if (method === 'projects.get' || method === 'projects.update') return { project: created }
+       if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      listCalls += 1
++      if (listCalls === 1) return { active_id: null, projects: [], scoped_session_ids: [] }
+       return { active_id: null, projects: [created], scoped_session_ids: [] }
+     })
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+@@ -486,6 +491,113 @@ describe('createProject', () => {
+   })
+ })
+ 
++describe('materializeAutoProject authority', () => {
++  const autoProject = {
++    color: null,
++    icon: null,
++    id: '/repo',
++    isAuto: true,
++    label: 'repo',
++    path: '/repo'
++  } as const
++  const listed = {
++    archived: false,
++    board_slug: null,
++    color: null,
++    created_at: 1,
++    description: null,
++    folders: [{ added_at: 1, is_primary: true, label: null, path: '/repo' }],
++    icon: null,
++    id: 'p_stable',
++    name: 'stale list name',
++    primary_path: '/repo',
++    slug: 'repo'
++  }
++  const authoritative = { ...listed, name: 'Authoritative' }
++
++  beforeEach(() => {
++    vi.clearAllMocks()
++    $activeGatewayProfile.set('default')
++    setShowAllProfiles(false)
++    $projectsRpcAvailable.set(null)
++    $projects.set([])
++    $projectTree.set([])
++  })
++
++  it('resolves a stable row through authoritative list/get when the renderer cache is stale', async () => {
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.list') return { active_id: null, projects: [listed] }
++      if (method === 'projects.get') return { project: authoritative }
++      throw new Error(`must not call ${method}`)
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++
++    await expect(materializeAutoProject(autoProject)).resolves.toEqual(authoritative)
++    expect(request.mock.calls).toEqual([
++      ['projects.list', { profile: 'default' }],
++      ['projects.get', { id: 'p_stable', profile: 'default' }]
++    ])
++  })
++
++  it('coalesces concurrent stale-cache materialization onto one authoritative row', async () => {
++    const listing = deferred<{ active_id: null; projects: (typeof listed)[] }>()
++    const request = vi.fn((method: string) => {
++      if (method === 'projects.list') return listing.promise
++      if (method === 'projects.get') return Promise.resolve({ project: authoritative })
++      throw new Error(`must not call ${method}`)
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++
++    const first = materializeAutoProject(autoProject)
++    const second = materializeAutoProject(autoProject)
++    listing.resolve({ active_id: null, projects: [listed] })
++
++    await expect(Promise.all([first, second])).resolves.toEqual([authoritative, authoritative])
++    expect(request.mock.calls.filter(([method]) => method === 'projects.list')).toHaveLength(1)
++    expect(request.mock.calls.filter(([method]) => method === 'projects.get')).toHaveLength(1)
++  })
++
++  it('reconciles one duplicate-primary create race through list/get instead of failing', async () => {
++    let listCalls = 0
++    const duplicate = new JsonRpcGatewayError(
++      "folder already belongs to project 'repo' (p_stable); switch to it instead of creating a duplicate",
++      { code: 5063 }
++    )
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.list') {
++        listCalls += 1
++        return { active_id: null, projects: listCalls === 1 ? [] : [listed] }
++      }
++      if (method === 'projects.create') throw duplicate
++      if (method === 'projects.get') return { project: authoritative }
++      throw new Error(`unexpected ${method}`)
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++
++    await expect(materializeAutoProject(autoProject)).resolves.toEqual(authoritative)
++    expect(request.mock.calls.filter(([method]) => method === 'projects.create')).toHaveLength(1)
++    expect(request.mock.calls.filter(([method]) => method === 'projects.list')).toHaveLength(2)
++    expect(request.mock.calls.filter(([method]) => method === 'projects.get')).toHaveLength(1)
++  })
++
++  it('bounds duplicate-primary reconciliation and preserves the original rejection when no row appears', async () => {
++    const duplicate = new JsonRpcGatewayError(
++      "folder already belongs to project 'repo' (p_missing); switch to it instead of creating a duplicate",
++      { code: 5063 }
++    )
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.list') return { active_id: null, projects: [] }
++      if (method === 'projects.create') throw duplicate
++      throw new Error(`unexpected ${method}`)
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++
++    await expect(materializeAutoProject(autoProject)).rejects.toBe(duplicate)
++    expect(request.mock.calls.filter(([method]) => method === 'projects.list')).toHaveLength(2)
++    expect(request.mock.calls.filter(([method]) => method === 'projects.create')).toHaveLength(1)
++  })
++})
++
+ describe('projects RPC capability', () => {
+   beforeEach(() => {
+     vi.clearAllMocks()
+diff --git a/apps/desktop/src/store/projects.ts b/apps/desktop/src/store/projects.ts
+index 9cc151395..a085a9aff 100644
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -11,7 +11,7 @@ import { translateNow } from '@/i18n'
+ import { desktopDefaultCwd, isDesktopFsRemoteMode, selectDesktopPaths, writeDesktopFileText } from '@/lib/desktop-fs'
+ import { desktopGit } from '@/lib/desktop-git'
+ import { isMissingRestEndpoint, isMissingRpcMethod } from '@/lib/gateway-rpc'
+-import { isUnderPath } from '@/lib/path-compare'
++import { cleanPath, comparisonPath, isUnderPath } from '@/lib/path-compare'
+ import { persistentAtom } from '@/lib/persisted'
+ import { $gateway, activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
+ import { setSidebarAgentsGrouped } from '@/store/layout'
+@@ -1006,6 +1006,145 @@ type AutoProjectIdentity = Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'i
+ 
+ const samePath = (left: string, right: string): boolean => isUnderPath(left, right) && isUnderPath(right, left)
+ 
++const materializingAutoProjects = new WeakMap<HermesGateway, Map<string, Promise<ProjectInfo | null>>>()
++
++function autoProjectMaterializationKey(profile: string, path: string): string {
++  return `${profile}\0${comparisonPath(cleanPath(path))}`
++}
++
++function findProjectByPath(projects: readonly ProjectInfo[], path: string): ProjectInfo | null {
++  return (
++    projects.find(
++      candidate =>
++        !candidate.archived &&
++        [candidate.primary_path, ...candidate.folders.map(folder => folder.path)].some(
++          candidatePath => candidatePath && samePath(candidatePath, path)
++        )
++    ) ?? null
++  )
++}
++
++function isDuplicatePrimaryProjectError(error: unknown): boolean {
++  const code = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined
++  const message = error instanceof Error ? error.message : String(error)
++
++  return code === 5063 && /folder already belongs to project.+instead of creating a duplicate/i.test(message)
++}
++
++async function authoritativeProjectForPath(context: ActiveProjectsContext, path: string): Promise<ProjectInfo | null> {
++  const payload = await gatewayRequestOn<ProjectsPayload>(
++    context.gateway,
++    'projects.list',
++    projectParams({}, context.profile)
++  )
++  markProjectsRpcSuccess()
++  const listed = findProjectByPath(payload.projects ?? [], path)
++
++  if (!listed) return null
++
++  const { project } = await gatewayRequestOn<{ project: ProjectInfo | null }>(
++    context.gateway,
++    'projects.get',
++    projectParams({ id: listed.id }, context.profile)
++  )
++
++  return project && !project.archived && findProjectByPath([project], path) ? project : null
++}
++
++function cacheMaterializedProject(context: ActiveProjectsContext, project: ProjectInfo): void {
++  if (!stillOnProjectsContext(context)) return
++
++  const cached = $projects.get()
++  const index = cached.findIndex(candidate => candidate.id === project.id)
++  $projects.set(index === -1 ? [...cached, project] : cached.map((candidate, i) => (i === index ? project : candidate)))
++}
++
++async function createMaterializedProject(
++  context: ActiveProjectsContext,
++  project: AutoProjectIdentity
++): Promise<ProjectInfo | null> {
++  let response: { project: ProjectInfo | null }
++
++  try {
++    response = await gatewayRequestOn<{ project: ProjectInfo | null }>(
++      context.gateway,
++      'projects.create',
++      projectParams(
++        {
++          name: project.label,
++          folders: [project.path!],
++          primary_path: project.path!,
++          color: project.color || undefined,
++          icon: project.icon || undefined,
++          use: false
++        },
++        context.profile
++      )
++    )
++  } catch (error) {
++    if (isMissingRpcMethod(error)) {
++      $projectsRpcAvailable.set(false)
++      throw projectsStaleBackendError()
++    }
++
++    if (!isDuplicatePrimaryProjectError(error)) throw error
++
++    // Another renderer/process won the create race after our first list.
++    // Reconcile once; if the row still is not visible, preserve the original
++    // rejection instead of looping or disguising an inconsistent backend.
++    const raced = await authoritativeProjectForPath(context, project.path!)
++    if (!raced) throw error
++
++    return raced
++  }
++
++  markProjectsRpcSuccess()
++  return response.project
++}
++
++async function resolveMaterializedAutoProject(
++  context: ActiveProjectsContext,
++  project: AutoProjectIdentity
++): Promise<ProjectInfo | null> {
++  try {
++    const existing = await authoritativeProjectForPath(context, project.path!)
++    return existing ?? createMaterializedProject(context, project)
++  } catch (error) {
++    if (isMissingRpcMethod(error)) {
++      $projectsRpcAvailable.set(false)
++      throw projectsStaleBackendError()
++    }
++
++    throw error
++  }
++}
++
++async function patchMaterializedProject(
++  context: ActiveProjectsContext,
++  project: ProjectInfo,
++  patch: ProjectAppearancePatch
++): Promise<ProjectInfo> {
++  const response = await gatewayRequestOn<{ project: ProjectInfo }>(
++    context.gateway,
++    'projects.update',
++    projectParams(
++      {
++        id: project.id,
++        ...patch,
++        ...(patch.color === null && { color: '' }),
++        ...(patch.icon === null && { icon: '' })
++      },
++      context.profile
++    )
++  )
++
++  if (!response.project) {
++    throw new Error(`projects.update returned no project for ${project.id}`)
++  }
++
++  return response.project
++}
++
+ // Any durable per-Project metadata must be written against a projects.db id,
+ // never an auto-discovered repo's transient path id. Materialize once and hand
+ // callers the authoritative row returned by the backend.
+@@ -1014,32 +1153,37 @@ export async function materializeAutoProject(
+   patch: ProjectAppearancePatch = {}
+ ): Promise<ProjectInfo | null> {
+   if (!project.isAuto || !project.path) return null
+-  const projectPath = project.path
++  const context = await activeProjectsContext()
++  const key = autoProjectMaterializationKey(context.profile, project.path)
++  let pendingByPath = materializingAutoProjects.get(context.gateway)
+ 
+-  const existing = $projects
+-    .get()
+-    .find(candidate =>
+-      [candidate.primary_path, ...candidate.folders.map(folder => folder.path)].some(
+-        path => path && samePath(path, projectPath)
+-      )
+-    )
++  if (!pendingByPath) {
++    pendingByPath = new Map()
++    materializingAutoProjects.set(context.gateway, pendingByPath)
++  }
+ 
+-  if (existing) {
+-    if (patch.color !== undefined || patch.icon !== undefined) {
+-      await updateProject(existing.id, patch)
+-    }
++  let pending = pendingByPath.get(key)
++  if (!pending) {
++    pending = resolveMaterializedAutoProject(context, project).finally(() => {
++      pendingByPath?.delete(key)
++    })
++    pendingByPath.set(key, pending)
++  }
++
++  let materialized = await pending
++  if (!materialized) return null
+ 
+-    return existing
++  cacheMaterializedProject(context, materialized)
++  if (stillOnProjectsContext(context)) {
++    setSidebarAgentsGrouped(true)
+   }
+ 
+-  return createProject({
+-    name: project.label,
+-    folders: [project.path],
+-    primaryPath: project.path,
+-    // Carry any already-set look so setting one field doesn't wipe the other.
+-    color: (patch.color ?? project.color) || undefined,
+-    icon: (patch.icon ?? project.icon) || undefined
+-  })
++  if (patch.color !== undefined || patch.icon !== undefined) {
++    materialized = await patchMaterializedProject(context, materialized, patch)
++    cacheMaterializedProject(context, materialized)
++  }
++
++  return materialized
+ }
+ 
+ // Appearance for an AUTO (inherited git-repo) project has no projects.db row to
+-- 
+2.50.1 (Apple Git-155)
+

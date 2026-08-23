@@ -1,0 +1,417 @@
+From 31edbf4389acaa5aaf76db5890bfa7584bc3b31b Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 02:10:37 +0300
+Subject: [PATCH 6/9] fix(desktop): preserve grouping across project adoption
+
+---
+ .../sidebar/projects-presentation.test.ts     | 18 ++++++
+ .../app/chat/sidebar/projects-presentation.ts | 57 +++++++++++++++---
+ .../sidebar/projects/project-menu.test.tsx    | 58 +++++++++++++++++-
+ .../chat/sidebar/projects/project-menu.tsx    |  6 +-
+ apps/desktop/src/store/projects.test.ts       | 46 ++++++++++++++
+ apps/desktop/src/store/projects.ts            | 60 ++++++++++++++-----
+ 6 files changed, 218 insertions(+), 27 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index 66fab928b..c4c14a1c9 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -50,6 +50,24 @@ describe('Projects grouping contribution', () => {
+     expect(resolveProjectsGrouping([project('a')])?.groups[0].id).toBe('valid')
+   })
+ 
++  it.each([
++    { id: 42, label: 'Broken', projectIds: ['a'] },
++    { id: '   ', label: 'Broken', projectIds: ['a'] },
++    { id: 'broken', label: null, projectIds: ['a'] },
++    { id: 'broken', label: '   ', projectIds: ['a'] },
++    { id: 'broken', label: 'Broken', projectIds: 'a' },
++    { id: 'broken', label: 'Broken', projectIds: ['a', 42] }
++  ])('rejects a provider with malformed group descriptor %# and sanitizes the fallback', malformed => {
++    register({ getSnapshot: () => ({ groups: [malformed] }), subscribe: () => () => undefined }, 0)
++    register(provider([{ id: ' valid ', label: ' Valid ', projectIds: [' a '] }]), 10)
++
++    const resolved = resolveProjectsGrouping([project('a')])
++    const { result } = renderHook(() => useActiveProjectsGrouping())
++
++    expect(resolved?.groups).toEqual([{ collapsed: false, id: 'valid', label: 'Valid', projects: [project('a')] }])
++    expect(result.current?.snapshot.groups).toEqual([{ id: 'valid', label: 'Valid', projectIds: ['a'] }])
++  })
++
+   it('keeps Home fixed and sends stale, duplicate and omitted ids to core Ungrouped', () => {
+     register(
+       provider([
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index 4830e8436..fd6368069 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -43,6 +43,39 @@ export interface PresentedProjectsGrouping {
+   readonly ungrouped: readonly SidebarProjectTree[]
+ }
+ 
++function sanitizeSnapshot(value: unknown): ProjectsGroupingSnapshot | null {
++  if (!value || typeof value !== 'object' || !Array.isArray((value as Partial<ProjectsGroupingSnapshot>).groups)) {
++    return null
++  }
++
++  const groups: ProjectGroupDescriptor[] = []
++
++  for (const raw of (value as { groups: readonly unknown[] }).groups) {
++    if (!raw || typeof raw !== 'object') return null
++
++    const group = raw as Partial<ProjectGroupDescriptor>
++    if (
++      typeof group.id !== 'string' ||
++      !group.id.trim() ||
++      typeof group.label !== 'string' ||
++      !group.label.trim() ||
++      !Array.isArray(group.projectIds) ||
++      !group.projectIds.every(projectId => typeof projectId === 'string')
++    ) {
++      return null
++    }
++
++    groups.push({
++      id: group.id.trim(),
++      label: group.label.trim(),
++      projectIds: group.projectIds.map(projectId => projectId.trim()).filter(Boolean),
++      ...(group.collapsed === true && { collapsed: true })
++    })
++  }
++
++  return { groups }
++}
++
+ function readValidProvider(): {
+   contribution: ProjectsGroupingContribution
+   snapshot: ProjectsGroupingSnapshot
+@@ -52,8 +85,8 @@ function readValidProvider(): {
+     if (typeof contribution?.getSnapshot !== 'function' || typeof contribution.subscribe !== 'function') continue
+ 
+     try {
+-      const snapshot = contribution.getSnapshot()
+-      if (snapshot && Array.isArray(snapshot.groups)) {
++      const snapshot = sanitizeSnapshot(contribution.getSnapshot())
++      if (snapshot) {
+         return { contribution: contribution as ProjectsGroupingContribution, snapshot }
+       }
+     } catch {
+@@ -135,13 +168,20 @@ function snapshotsEqual(left: ProjectsGroupingSnapshot, right: ProjectsGroupingS
+   })
+ }
+ 
+-function createStoreAdapter(contribution: ProjectsGroupingContribution) {
+-  let cachedSnapshot: ProjectsGroupingSnapshot | undefined
++function createStoreAdapter(contribution: ProjectsGroupingContribution, initialSnapshot: ProjectsGroupingSnapshot) {
++  let cachedSnapshot = initialSnapshot
+ 
+   return {
+     getSnapshot: () => {
+-      const snapshot = contribution.getSnapshot()
+-      if (cachedSnapshot && snapshotsEqual(cachedSnapshot, snapshot)) return cachedSnapshot
++      let snapshot: ProjectsGroupingSnapshot | null = null
++
++      try {
++        snapshot = sanitizeSnapshot(contribution.getSnapshot())
++      } catch {
++        // Keep the last safe value if an accepted provider later misbehaves.
++      }
++
++      if (!snapshot || snapshotsEqual(cachedSnapshot, snapshot)) return cachedSnapshot
+       cachedSnapshot = snapshot
+       return snapshot
+     },
+@@ -153,7 +193,10 @@ function useProjectsGroupingStore() {
+   useContributions(PROJECTS_GROUPING_AREA)
+   const active = readValidProvider()
+   const contribution = active?.contribution ?? null
+-  const store = useMemo(() => (contribution ? createStoreAdapter(contribution) : null), [contribution])
++  const store = useMemo(
++    () => (contribution && active ? createStoreAdapter(contribution, active.snapshot) : null),
++    [contribution]
++  )
+   const snapshot = useSyncExternalStore(
+     store?.subscribe ?? EMPTY_SUBSCRIBE,
+     store?.getSnapshot ?? NULL_SNAPSHOT,
+diff --git a/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx b/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx
+index e0df9f2a5..e83f01828 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/projects/project-menu.test.tsx
+@@ -1,10 +1,19 @@
+-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
++import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+ 
++import { registry } from '@/contrib/registry'
++
++import { PROJECTS_GROUPING_AREA, type ProjectsGroupingContribution } from '../projects-presentation'
+ import { ProjectMenu } from './project-menu'
+ import type { SidebarProjectTree } from './workspace-groups'
+ 
+-afterEach(cleanup)
++const disposers: Array<() => void> = []
++
++afterEach(() => {
++  cleanup()
++  vi.clearAllMocks()
++  while (disposers.length) disposers.pop()?.()
++})
+ 
+ // jsdom doesn't implement ResizeObserver; Radix's PopoverContent/Arrow use it
+ // (via @radix-ui/react-use-size) to measure the arrow once the popover is
+@@ -35,9 +44,11 @@ vi.mock('@/i18n', () => ({
+           menuDelete: 'Delete',
+           menuRename: 'Rename',
+           menuSetActive: 'Set active',
++          moveToGroup: 'Move to group',
+           noColor: 'No color',
+           removeFromSidebar: 'Remove from sidebar',
+-          reveal: 'Reveal in file manager'
++          reveal: 'Reveal in file manager',
++          ungrouped: 'Ungrouped'
+         }
+       }
+     }
+@@ -60,6 +71,7 @@ vi.mock('@/store/layout', () => ({
+ vi.mock('@/store/projects', () => ({
+   copyPath: vi.fn(),
+   deleteProject: vi.fn(),
++  materializeAutoProject: vi.fn(),
+   openProjectAddFolder: vi.fn(),
+   openProjectRename: vi.fn(),
+   revealPath: vi.fn(),
+@@ -76,6 +88,10 @@ const project = {
+   path: '/repo'
+ } as unknown as SidebarProjectTree
+ 
++const projectsStore = await import('@/store/projects')
++const materializeAutoProject = vi.mocked(projectsStore.materializeAutoProject)
++const setProjectAppearance = vi.mocked(projectsStore.setProjectAppearance)
++
+ const tipTrigger = (el: HTMLElement) => el.closest('[data-slot="tooltip-trigger"]')
+ 
+ const openTriggerMenu = (trigger: HTMLElement) => {
+@@ -115,4 +131,40 @@ describe('ProjectMenu', () => {
+     // chain rather than getting silently dropped on an intermediate wrapper.
+     expect(await screen.findByRole('button', { name: 'No color' })).toBeTruthy()
+   }, 15000)
++
++  it('adopts an auto Project before grouping so later appearance edits keep its membership', async () => {
++    const autoProject = { ...project, id: '/repo', isAuto: true }
++    const adoptedProject = { ...project, id: 'p_stable', isAuto: false }
++    let snapshot = { groups: [{ id: 'cue', label: 'CUE++', projectIds: [] as string[] }] }
++    const assignProject = vi.fn(async (projectId: string, groupId: string | null) => {
++      snapshot = {
++        groups: [{ ...snapshot.groups[0], projectIds: groupId === 'cue' ? [projectId] : [] }]
++      }
++    })
++    const contribution: ProjectsGroupingContribution = {
++      assignProject,
++      getSnapshot: () => snapshot,
++      subscribe: () => () => undefined
++    }
++    disposers.push(registry.register({ area: PROJECTS_GROUPING_AREA, data: contribution, id: 'groups' }))
++    materializeAutoProject.mockResolvedValue(adoptedProject as never)
++
++    const view = render(<ProjectMenu isActive={false} project={autoProject} />)
++    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
++    const moveToGroup = await screen.findByRole('menuitem', { name: 'Move to group' })
++    fireEvent.pointerMove(moveToGroup, { pointerType: 'mouse' })
++    fireEvent.pointerEnter(moveToGroup, { pointerType: 'mouse' })
++    fireEvent.click(await screen.findByRole('menuitem', { name: 'CUE++' }))
++
++    await waitFor(() => expect(assignProject).toHaveBeenCalledWith('p_stable', 'cue'))
++    expect(materializeAutoProject).toHaveBeenCalledWith(autoProject)
++
++    view.rerender(<ProjectMenu isActive={false} project={adoptedProject} />)
++    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
++    fireEvent.click(await screen.findByRole('menuitem', { name: 'Appearance' }))
++    fireEvent.click(await screen.findByRole('button', { name: 'No color' }))
++
++    await waitFor(() => expect(setProjectAppearance).toHaveBeenCalledWith(adoptedProject, { color: null }))
++    expect(snapshot.groups[0].projectIds).toEqual(['p_stable'])
++  }, 15000)
+ })
+diff --git a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+index b951fa694..090772ff1 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
++++ b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+@@ -29,6 +29,7 @@ import { notifyError } from '@/store/notifications'
+ import {
+   copyPath,
+   deleteProject,
++  materializeAutoProject,
+   openProjectAddFolder,
+   openProjectRename,
+   revealPath,
+@@ -69,7 +70,10 @@ function useProjectActions({
+     if (!grouping?.contribution.assignProject || groupPending || groupId === claimedGroupId) return
+     setGroupPending(true)
+     try {
+-      await grouping.contribution.assignProject(project.id, groupId)
++      const adopted = project.isAuto ? await materializeAutoProject(project) : null
++      const projectId = project.isAuto ? adopted?.id : project.id
++      if (!projectId) return
++      await grouping.contribution.assignProject(projectId, groupId)
+     } catch (error) {
+       notifyError(error, p.groupUpdateFailed)
+     } finally {
+diff --git a/apps/desktop/src/store/projects.test.ts b/apps/desktop/src/store/projects.test.ts
+index e80b64588..989037060 100644
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -22,6 +22,7 @@ import {
+   enterProject,
+   exitProjectScope,
+   fetchProjectSessions,
++  materializeAutoProject,
+   openProjectCreate,
+   pickProjectFolder,
+   projectIdForCwd,
+@@ -31,6 +32,7 @@ import {
+   refreshWorktrees,
+   resolveNewSessionCwd,
+   scanAndRecordRepos,
++  setProjectAppearance,
+   startWorkInRepo,
+   tombstoneSessions
+ } from './projects'
+@@ -438,6 +440,50 @@ describe('createProject', () => {
+     )
+     expect($projectsRpcAvailable.get()).toBe(false)
+   })
++
++  it('keeps grouping on the stable id when an auto Project is materialized before appearance', async () => {
++    const created = {
++      archived: false,
++      board_slug: null,
++      color: null,
++      created_at: 1,
++      description: null,
++      folders: [{ added_at: 1, is_primary: true, label: null, path: '/repo' }],
++      icon: null,
++      id: 'p_stable',
++      name: 'repo',
++      primary_path: '/repo',
++      slug: 'repo'
++    }
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.create') return { project: created }
++      if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      return { active_id: null, projects: [created], scoped_session_ids: [] }
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++    $projects.set([])
++    $projectTree.set([])
++    const autoProject = {
++      color: null,
++      icon: null,
++      id: '/repo',
++      isAuto: true,
++      label: 'repo',
++      path: '/repo'
++    } as const
++    const membership: string[] = []
++
++    const adopted = await materializeAutoProject(autoProject)
++    if (adopted) membership.push(adopted.id)
++    await setProjectAppearance(autoProject, { color: '#123456' })
++
++    expect(membership).toEqual(['p_stable'])
++    expect(request.mock.calls.filter(([method]) => method === 'projects.create')).toHaveLength(1)
++    expect(request).toHaveBeenCalledWith(
++      'projects.update',
++      expect.objectContaining({ color: '#123456', id: 'p_stable' })
++    )
++  })
+ })
+ 
+ describe('projects RPC capability', () => {
+diff --git a/apps/desktop/src/store/projects.ts b/apps/desktop/src/store/projects.ts
+index c6f9df847..9cc151395 100644
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -1001,6 +1001,47 @@ export async function updateProject(
+   )
+ }
+ 
++type ProjectAppearancePatch = { color?: null | string; icon?: null | string }
++type AutoProjectIdentity = Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'isAuto' | 'label' | 'path'>
++
++const samePath = (left: string, right: string): boolean => isUnderPath(left, right) && isUnderPath(right, left)
++
++// Any durable per-Project metadata must be written against a projects.db id,
++// never an auto-discovered repo's transient path id. Materialize once and hand
++// callers the authoritative row returned by the backend.
++export async function materializeAutoProject(
++  project: AutoProjectIdentity,
++  patch: ProjectAppearancePatch = {}
++): Promise<ProjectInfo | null> {
++  if (!project.isAuto || !project.path) return null
++  const projectPath = project.path
++
++  const existing = $projects
++    .get()
++    .find(candidate =>
++      [candidate.primary_path, ...candidate.folders.map(folder => folder.path)].some(
++        path => path && samePath(path, projectPath)
++      )
++    )
++
++  if (existing) {
++    if (patch.color !== undefined || patch.icon !== undefined) {
++      await updateProject(existing.id, patch)
++    }
++
++    return existing
++  }
++
++  return createProject({
++    name: project.label,
++    folders: [project.path],
++    primaryPath: project.path,
++    // Carry any already-set look so setting one field doesn't wipe the other.
++    color: (patch.color ?? project.color) || undefined,
++    icon: (patch.icon ?? project.icon) || undefined
++  })
++}
++
+ // Appearance for an AUTO (inherited git-repo) project has no projects.db row to
+ // write to — its id is just the repo path. So the first color/icon change ADOPTS
+ // the repo as a real project (folder = repo root, name = its label) carrying the
+@@ -1008,8 +1049,8 @@ export async function updateProject(
+ // Returns true when an adoption happened, so an incremental picker can close
+ // (the node's id changes on adopt, and a second stale write would double-create).
+ export async function setProjectAppearance(
+-  project: Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'isAuto' | 'label' | 'path'>,
+-  patch: { color?: null | string; icon?: null | string }
++  project: AutoProjectIdentity,
++  patch: ProjectAppearancePatch
+ ): Promise<boolean> {
+   if (!project.isAuto) {
+     await updateProject(project.id, patch)
+@@ -1017,20 +1058,7 @@ export async function setProjectAppearance(
+     return false
+   }
+ 
+-  if (!project.path) {
+-    return false
+-  }
+-
+-  await createProject({
+-    name: project.label,
+-    folders: [project.path],
+-    primaryPath: project.path,
+-    // Carry any already-set look so setting one field doesn't wipe the other.
+-    color: (patch.color ?? project.color) || undefined,
+-    icon: (patch.icon ?? project.icon) || undefined
+-  })
+-
+-  return true
++  return Boolean(await materializeAutoProject(project, patch))
+ }
+ 
+ export async function addProjectFolder(
+-- 
+2.50.1 (Apple Git-155)
+

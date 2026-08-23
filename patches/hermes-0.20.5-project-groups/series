@@ -1,0 +1,9 @@
+0001-feat-desktop-add-Project-presentation-plugin-area.patch
+0002-fix-desktop-preserve-grouped-project-reordering.patch
+0003-feat-desktop-add-reactive-project-grouping-API.patch
+0004-feat-desktop-add-native-project-group-controls.patch
+0005-fix-desktop-harden-project-grouping-providers.patch
+0006-fix-desktop-preserve-grouping-across-project-adoptio.patch
+0007-fix-desktop-reconcile-grouped-project-materializatio.patch
+0008-fix-desktop-reconcile-adopted-project-trees.patch
+0009-fix-desktop-preserve-adopted-project-scope.patch

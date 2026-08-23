@@ -1,0 +1,675 @@
+From 5b4cec3e7a6f3e5e44f9dd8aec91a1771f0cb8be Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 01:35:07 +0300
+Subject: [PATCH 4/9] feat(desktop): add native project group controls
+
+---
+ apps/desktop/src/app/chat/sidebar/index.tsx   | 68 ++++++++++----
+ .../sidebar/project-group-dialog.test.tsx     | 72 +++++++++++++++
+ .../app/chat/sidebar/project-group-dialog.tsx | 92 +++++++++++++++++++
+ .../chat/sidebar/projects/project-menu.tsx    | 90 +++++++++++++++---
+ .../src/app/chat/sidebar/sessions-section.tsx | 53 ++++++-----
+ apps/desktop/src/i18n/ar.ts                   |  9 ++
+ apps/desktop/src/i18n/en.ts                   |  9 ++
+ apps/desktop/src/i18n/ja.ts                   |  9 ++
+ apps/desktop/src/i18n/types.ts                |  9 ++
+ apps/desktop/src/i18n/zh-hant.ts              |  9 ++
+ apps/desktop/src/i18n/zh.ts                   |  9 ++
+ 11 files changed, 374 insertions(+), 55 deletions(-)
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-dialog.test.tsx
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-dialog.tsx
+
+diff --git a/apps/desktop/src/app/chat/sidebar/index.tsx b/apps/desktop/src/app/chat/sidebar/index.tsx
+index fe11212e4..817b07ab4 100644
+--- a/apps/desktop/src/app/chat/sidebar/index.tsx
++++ b/apps/desktop/src/app/chat/sidebar/index.tsx
+@@ -151,6 +151,8 @@ import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds }
+ import { filterSessionsByProfileScope } from './profile-scope'
+ import { ProfileRail } from './profile-switcher'
+ import { ProjectDialog } from './project-dialog'
++import { ProjectGroupDialog } from './project-group-dialog'
++import { useActiveProjectsGrouping } from './projects-presentation'
+ import {
+   excludeProjectSessions,
+   liveSessionProjectId,
+@@ -327,6 +329,8 @@ export function ChatSidebar({
+   // Contributed nav rows (plugins pairing a page with a sidebar entry) render
+   // below the built-ins with the same chrome; active = at their route.
+   const navContributions = useContributions(SIDEBAR_NAV_AREA)
++  const projectsGrouping = useActiveProjectsGrouping()
++  const [projectGroupDialogOpen, setProjectGroupDialogOpen] = useState(false)
+ 
+   const contributedNav = useMemo<SidebarNavItem[]>(
+     () =>
+@@ -1753,25 +1757,43 @@ export function ChatSidebar({
+                     ) : (
+                       <>
+                         {!showAllProfiles ? (
+-                          <Tip label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}>
+-                            <Button
+-                              aria-label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}
+-                              className={HEADER_ACTION_BTN}
+-                              onClick={event => {
+-                                event.stopPropagation()
+-
+-                                if (agentsGrouped) {
+-                                  openProjectCreate()
+-                                } else {
+-                                  onNewSessionInWorkspace(null)
+-                                }
+-                              }}
+-                              size="icon-xs"
+-                              variant="ghost"
+-                            >
+-                              <Codicon name="add" size="0.75rem" />
+-                            </Button>
+-                          </Tip>
++                          <>
++                            <Tip label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}>
++                              <Button
++                                aria-label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}
++                                className={HEADER_ACTION_BTN}
++                                onClick={event => {
++                                  event.stopPropagation()
++
++                                  if (agentsGrouped) {
++                                    openProjectCreate()
++                                  } else {
++                                    onNewSessionInWorkspace(null)
++                                  }
++                                }}
++                                size="icon-xs"
++                                variant="ghost"
++                              >
++                                <Codicon name="add" size="0.75rem" />
++                              </Button>
++                            </Tip>
++                            {agentsGrouped && projectsGrouping?.contribution.createGroup ? (
++                              <Tip label={s.projects.createGroup}>
++                                <Button
++                                  aria-label={s.projects.createGroup}
++                                  className={HEADER_ACTION_BTN}
++                                  onClick={event => {
++                                    event.stopPropagation()
++                                    setProjectGroupDialogOpen(true)
++                                  }}
++                                  size="icon-xs"
++                                  variant="ghost"
++                                >
++                                  <Codicon name="new-folder" size="0.75rem" />
++                                </Button>
++                              </Tip>
++                            ) : null}
++                          </>
+                         ) : null}
+                         <div className="grid size-6 place-items-center">
+                           <SidebarFilterMenu className={HEADER_NAV_BTN} />
+@@ -1891,6 +1913,14 @@ export function ChatSidebar({
+         </div>
+       </SidebarContent>
+       <ProjectDialog />
++      {projectsGrouping?.contribution.createGroup ? (
++        <ProjectGroupDialog
++          contribution={projectsGrouping.contribution}
++          onOpenChange={setProjectGroupDialogOpen}
++          open={projectGroupDialogOpen}
++          snapshot={projectsGrouping.snapshot}
++        />
++      ) : null}
+       {/* One mount for the whole app. The header of WorktreeDialog tells why. */}
+       <WorktreeDialog />
+     </Sidebar>
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-dialog.test.tsx b/apps/desktop/src/app/chat/sidebar/project-group-dialog.test.tsx
+new file mode 100644
+index 000000000..4c7b44dad
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-dialog.test.tsx
+@@ -0,0 +1,72 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++import { ProjectGroupDialog, normalizeProjectGroupName } from './project-group-dialog'
++import type { ProjectsGroupingContribution } from './projects-presentation'
++
++vi.mock('@/i18n', () => ({
++  useI18n: () => ({
++    t: {
++      common: { cancel: 'Cancel' },
++      sidebar: {
++        projects: {
++          create: 'Create',
++          createGroupTitle: 'New project group',
++          groupCreateFailed: 'Could not create project group',
++          groupNameDuplicate: 'Duplicate group',
++          groupNameInvalid: 'Invalid group',
++          groupNamePlaceholder: 'Group name'
++        }
++      }
++    }
++  })
++}))
++
++vi.mock('@/store/notifications', () => ({ notifyError: vi.fn() }))
++
++afterEach(cleanup)
++
++const snapshot = { groups: [{ id: 'cue', label: 'CUE++', projectIds: [] }] }
++
++describe('ProjectGroupDialog', () => {
++  it('collapses whitespace and submits the normalized valid name', async () => {
++    const createGroup = vi.fn().mockResolvedValue(undefined)
++    const onOpenChange = vi.fn()
++    const contribution: ProjectsGroupingContribution = {
++      createGroup,
++      getSnapshot: () => snapshot,
++      subscribe: () => () => undefined
++    }
++    render(<ProjectGroupDialog contribution={contribution} onOpenChange={onOpenChange} open snapshot={snapshot} />)
++
++    fireEvent.change(screen.getByPlaceholderText('Group name'), { target: { value: '  RGC   Labs  ' } })
++    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
++
++    await waitFor(() => expect(createGroup).toHaveBeenCalledWith('RGC Labs'))
++    expect(onOpenChange).toHaveBeenCalledWith(false)
++  })
++
++  it('rejects blank, duplicate and oversized names before mutation', () => {
++    const createGroup = vi.fn()
++    const contribution: ProjectsGroupingContribution = {
++      createGroup,
++      getSnapshot: () => snapshot,
++      subscribe: () => () => undefined
++    }
++    render(<ProjectGroupDialog contribution={contribution} onOpenChange={vi.fn()} open snapshot={snapshot} />)
++
++    expect((screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement).disabled).toBe(true)
++    fireEvent.change(screen.getByPlaceholderText('Group name'), { target: { value: ' cue++ ' } })
++    expect(screen.getByText('Duplicate group')).toBeTruthy()
++    expect((screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement).disabled).toBe(true)
++    fireEvent.change(screen.getByPlaceholderText('Group name'), { target: { value: 'x'.repeat(101) } })
++    expect(screen.getByText('Invalid group')).toBeTruthy()
++    expect(createGroup).not.toHaveBeenCalled()
++  })
++})
++
++describe('normalizeProjectGroupName', () => {
++  it('collapses surrounding and internal whitespace', () => {
++    expect(normalizeProjectGroupName('  A\n  B  ')).toBe('A B')
++  })
++})
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-dialog.tsx b/apps/desktop/src/app/chat/sidebar/project-group-dialog.tsx
+new file mode 100644
+index 000000000..c0ac56ddd
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-dialog.tsx
+@@ -0,0 +1,92 @@
++import { useEffect, useRef, useState } from 'react'
++
++import { Button } from '@/components/ui/button'
++import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Input } from '@/components/ui/input'
++import { useI18n } from '@/i18n'
++import { notifyError } from '@/store/notifications'
++
++import type { ProjectsGroupingContribution, ProjectsGroupingSnapshot } from './projects-presentation'
++
++export function normalizeProjectGroupName(value: string): string {
++  return value.trim().replace(/\s+/g, ' ')
++}
++
++export function ProjectGroupDialog({
++  contribution,
++  snapshot,
++  open,
++  onOpenChange
++}: {
++  contribution: ProjectsGroupingContribution
++  snapshot: ProjectsGroupingSnapshot
++  open: boolean
++  onOpenChange(open: boolean): void
++}) {
++  const { t } = useI18n()
++  const p = t.sidebar.projects
++  const [name, setName] = useState('')
++  const [pending, setPending] = useState(false)
++  const inputRef = useRef<HTMLInputElement>(null)
++  const normalized = normalizeProjectGroupName(name)
++  const duplicate = snapshot.groups.some(
++    group => normalizeProjectGroupName(group.label).toLocaleLowerCase() === normalized.toLocaleLowerCase()
++  )
++  const invalid = normalized.length < 1 || normalized.length > 100
++
++  useEffect(() => {
++    if (open) {
++      setName('')
++      setPending(false)
++      window.setTimeout(() => inputRef.current?.focus(), 0)
++    }
++  }, [open])
++
++  const submit = async () => {
++    if (pending || invalid || duplicate || !contribution.createGroup) return
++    setPending(true)
++    try {
++      await contribution.createGroup(normalized)
++      onOpenChange(false)
++    } catch (error) {
++      notifyError(error, p.groupCreateFailed)
++    } finally {
++      setPending(false)
++    }
++  }
++
++  return (
++    <Dialog onOpenChange={onOpenChange} open={open}>
++      <DialogContent className="max-w-sm">
++        <DialogHeader>
++          <DialogTitle>{p.createGroupTitle}</DialogTitle>
++        </DialogHeader>
++        <Input
++          aria-invalid={Boolean(name) && (invalid || duplicate)}
++          disabled={pending}
++          onChange={event => setName(event.target.value)}
++          onKeyDown={event => {
++            if (event.key === 'Enter') {
++              event.preventDefault()
++              void submit()
++            }
++          }}
++          placeholder={p.groupNamePlaceholder}
++          ref={inputRef}
++          value={name}
++        />
++        {name && (invalid || duplicate) ? (
++          <p className="text-xs text-destructive">{duplicate ? p.groupNameDuplicate : p.groupNameInvalid}</p>
++        ) : null}
++        <DialogFooter>
++          <Button disabled={pending} onClick={() => onOpenChange(false)} variant="ghost">
++            {t.common.cancel}
++          </Button>
++          <Button disabled={pending || invalid || duplicate} onClick={() => void submit()}>
++            {p.create}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  )
++}
+diff --git a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+index 8e8677b9c..b951fa694 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
++++ b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+@@ -16,12 +16,16 @@ import {
+   DropdownMenuContent,
+   DropdownMenuItem,
+   DropdownMenuSeparator,
++  DropdownMenuSub,
++  DropdownMenuSubContent,
++  DropdownMenuSubTrigger,
+   DropdownMenuTrigger
+ } from '@/components/ui/dropdown-menu'
+ import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
+ import { useI18n } from '@/i18n'
+ import { cn } from '@/lib/utils'
+ import { $panesFlipped, dismissAutoProject } from '@/store/layout'
++import { notifyError } from '@/store/notifications'
+ import {
+   copyPath,
+   deleteProject,
+@@ -34,6 +38,7 @@ import {
+ 
+ import { ProjectAppearancePicker } from './project-appearance'
+ import type { SidebarProjectTree } from './workspace-groups'
++import { useActiveProjectsGrouping } from '../projects-presentation'
+ 
+ // Shared per-project state + handlers, so the kebab dropdown and the row's
+ // right-click menu drive the exact same actions. Modeled on git GUIs (GitHub
+@@ -56,6 +61,21 @@ function useProjectActions({
+   const p = t.sidebar.projects
+   const target = { id: project.id, name: project.label }
+   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
++  const grouping = useActiveProjectsGrouping()
++  const [groupPending, setGroupPending] = useState(false)
++  const claimedGroupId = grouping?.snapshot.groups.find(group => group.projectIds.includes(project.id))?.id ?? null
++
++  const assignProject = async (groupId: string | null) => {
++    if (!grouping?.contribution.assignProject || groupPending || groupId === claimedGroupId) return
++    setGroupPending(true)
++    try {
++      await grouping.contribution.assignProject(project.id, groupId)
++    } catch (error) {
++      notifyError(error, p.groupUpdateFailed)
++    } finally {
++      setGroupPending(false)
++    }
++  }
+ 
+   const removeAuto = () => {
+     dismissAutoProject(project.id)
+@@ -134,7 +154,7 @@ function useProjectActions({
+     />
+   )
+ 
+-  return { confirmDialog, dangerItem, identityItems, pathItems }
++  return { assignProject, claimedGroupId, confirmDialog, dangerItem, grouping, groupPending, identityItems, pathItems }
+ }
+ 
+ // Per-project actions. The kebab keeps its row-anchored Appearance popover; the
+@@ -166,12 +186,13 @@ export function ProjectMenu({
+   // when the panes are flipped (sidebar on the right).
+   const panesFlipped = useStore($panesFlipped)
+ 
+-  const { confirmDialog, dangerItem, identityItems, pathItems } = useProjectActions({
+-    isActive,
+-    onExitScope,
+-    project,
+-    scoped
+-  })
++  const { assignProject, claimedGroupId, confirmDialog, dangerItem, grouping, groupPending, identityItems, pathItems } =
++    useProjectActions({
++      isActive,
++      onExitScope,
++      project,
++      scoped
++    })
+ 
+   // Appearance writes route through the adopt-aware helper: an auto project is
+   // materialized on its first change (its id then changes), so close the picker
+@@ -249,6 +270,27 @@ export function ProjectMenu({
+             </>
+           )}
+           {pathItems.map(item => renderActionItem(DROPDOWN_KIT, item))}
++          {grouping?.contribution.assignProject && (
++            <DropdownMenuSub>
++              <DropdownMenuSubTrigger disabled={groupPending}>
++                <Codicon name="folder" size="0.875rem" />
++                <span>{p.moveToGroup}</span>
++              </DropdownMenuSubTrigger>
++              <DropdownMenuSubContent>
++                {grouping.snapshot.groups.map(group => (
++                  <DropdownMenuItem key={group.id} onSelect={() => void assignProject(group.id)}>
++                    <Codicon name={claimedGroupId === group.id ? 'check' : 'blank'} size="0.875rem" />
++                    {group.label}
++                  </DropdownMenuItem>
++                ))}
++                <DropdownMenuSeparator />
++                <DropdownMenuItem onSelect={() => void assignProject(null)}>
++                  <Codicon name={claimedGroupId === null ? 'check' : 'blank'} size="0.875rem" />
++                  {p.ungrouped}
++                </DropdownMenuItem>
++              </DropdownMenuSubContent>
++            </DropdownMenuSub>
++          )}
+           <DropdownMenuSeparator />
+           {renderActionItem(DROPDOWN_KIT, dangerItem)}
+         </DropdownMenuContent>
+@@ -294,12 +336,13 @@ export function ProjectContextMenu({
+   const { t } = useI18n()
+   const p = t.sidebar.projects
+ 
+-  const { confirmDialog, dangerItem, identityItems, pathItems } = useProjectActions({
+-    isActive,
+-    onExitScope,
+-    project,
+-    scoped
+-  })
++  const { assignProject, claimedGroupId, confirmDialog, dangerItem, grouping, groupPending, identityItems, pathItems } =
++    useProjectActions({
++      isActive,
++      onExitScope,
++      project,
++      scoped
++    })
+ 
+   const canTheme = !project.isAuto || Boolean(project.path)
+ 
+@@ -329,6 +372,27 @@ export function ProjectContextMenu({
+       )}
+       {(identityItems.length > 0 || canTheme) && <kit.Separator />}
+       {pathItems.map(item => renderActionItem(kit, item))}
++      {grouping?.contribution.assignProject && (
++        <kit.Sub>
++          <kit.SubTrigger disabled={groupPending}>
++            <Codicon name="folder" size="0.875rem" />
++            <span>{p.moveToGroup}</span>
++          </kit.SubTrigger>
++          <kit.SubContent>
++            {grouping.snapshot.groups.map(group => (
++              <kit.Item key={group.id} onSelect={() => void assignProject(group.id)}>
++                <Codicon name={claimedGroupId === group.id ? 'check' : 'blank'} size="0.875rem" />
++                {group.label}
++              </kit.Item>
++            ))}
++            <kit.Separator />
++            <kit.Item onSelect={() => void assignProject(null)}>
++              <Codicon name={claimedGroupId === null ? 'check' : 'blank'} size="0.875rem" />
++              {p.ungrouped}
++            </kit.Item>
++          </kit.SubContent>
++        </kit.Sub>
++      )}
+       <kit.Separator />
+       {renderActionItem(kit, dangerItem)}
+     </>
+diff --git a/apps/desktop/src/app/chat/sidebar/sessions-section.tsx b/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
+index 09286b6d0..bc960a9be 100644
+--- a/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
++++ b/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
+@@ -9,7 +9,7 @@ import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar'
+ import type { HermesGitWorktree } from '@/global'
+ import type { SessionInfo } from '@/hermes'
+ import { useI18n } from '@/i18n'
+-import { useContributions } from '@/contrib/react/use-contributions'
++import { notifyError } from '@/store/notifications'
+ import { flattenSessionsWithBranches } from '@/lib/session-branch-tree'
+ import {
+   groupEntriesByRecency,
+@@ -23,7 +23,7 @@ import { sessionPinId } from '@/store/session'
+ import { $sessionDotStateById, hasLiveTurn } from '@/store/session-dot-state'
+ 
+ import { SidebarDateDivider, SidebarSectionMeta } from './chrome'
+-import { PROJECTS_PRESENTATION_AREA, presentProjects } from './projects-presentation'
++import { useProjectsGrouping } from './projects-presentation'
+ import { orderRowsWithinGroups, reorderableRowIds } from './order'
+ import {
+   EnteredProjectContent,
+@@ -217,9 +217,7 @@ export function SidebarSessionsSection({
+   card = false
+ }: SidebarSessionsSectionProps) {
+   const { t } = useI18n()
+-  // Subscribe so a runtime plugin re-registration immediately re-resolves the
+-  // native Project overview instead of waiting for unrelated sidebar state.
+-  useContributions(PROJECTS_PRESENTATION_AREA)
++  const projectsGrouping = useProjectsGrouping(projectOverview ?? [])
+   const dividerLabels = t.sidebar.dateDivider
+   const statusDividerLabels = t.sidebar.statusDivider
+   const dotStates = useStore($sessionDotStateById)
+@@ -409,11 +407,10 @@ export function SidebarSessionsSection({
+   } else if (showEmptyState) {
+     inner = emptyState
+   } else if (projectOverview?.length) {
+-    const presented = presentProjects(projectOverview)
++    const presented = projectsGrouping
+ 
+     if (presented) {
+-      const projectsDraggable = Boolean(onReorderProjects && presented.groups.some(group => group.projects.length > 1))
+-      const NativeRow = projectsDraggable ? SortableProjectOverviewRow : ProjectOverviewRow
++      const NativeRow = ProjectOverviewRow
+       const nativeRow = (project: SidebarProjectTree) => (
+         <NativeRow
+           activeProjectId={activeProjectId}
+@@ -428,26 +425,36 @@ export function SidebarSessionsSection({
+ 
+       inner = (
+         <>
++          {presented.home && nativeRow(presented.home)}
+           {presented.groups.map(group => (
+             <div className="pb-1" key={group.id}>
+-              <div className="px-2 pb-1 pt-1.5 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
++              <button
++                aria-expanded={!group.collapsed}
++                className="flex w-full items-center gap-1 px-2 pb-1 pt-1.5 text-left text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)"
++                disabled={!presented.contribution.setGroupCollapsed}
++                onClick={() => {
++                  const setCollapsed = presented.contribution.setGroupCollapsed
++                  if (!setCollapsed) return
++                  void Promise.resolve(setCollapsed(group.id, !group.collapsed)).catch(error =>
++                    notifyError(error, t.sidebar.projects.groupUpdateFailed)
++                  )
++                }}
++                type="button"
++              >
++                <DisclosureCaret open={!group.collapsed} />
+                 {group.label}
+-              </div>
+-              {!group.collapsed &&
+-                (projectsDraggable && onReorderProjects && group.projects.length > 1 ? (
+-                  <ReorderableList
+-                    ids={group.projects.map(project => project.id)}
+-                    onReorder={onReorderProjects}
+-                    sensors={dndSensors}
+-                  >
+-                    {group.projects.map(nativeRow)}
+-                  </ReorderableList>
+-                ) : (
+-                  group.projects.map(nativeRow)
+-                ))}
++              </button>
++              {!group.collapsed && group.projects.map(nativeRow)}
+             </div>
+           ))}
+-          {presented.ungrouped.map(nativeRow)}
++          {presented.ungrouped.length > 0 && (
++            <div className="pb-1">
++              <div className="px-2 pb-1 pt-1.5 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
++                {t.sidebar.projects.ungrouped}
++              </div>
++              {presented.ungrouped.map(nativeRow)}
++            </div>
++          )}
+         </>
+       )
+     } else {
+diff --git a/apps/desktop/src/i18n/ar.ts b/apps/desktop/src/i18n/ar.ts
+index 9328dfddb..c9db8298e 100644
+--- a/apps/desktop/src/i18n/ar.ts
++++ b/apps/desktop/src/i18n/ar.ts
+@@ -1706,6 +1706,15 @@ export const ar = defineLocale({
+       primaryBadge: 'أساسي',
+       removeFolder: 'إزالة',
+       create: 'إنشاء',
++      createGroup: 'مجموعة جديدة',
++      createGroupTitle: 'مجموعة مشاريع جديدة',
++      groupNamePlaceholder: 'اسم المجموعة',
++      groupNameInvalid: 'أدخل اسماً من 1 إلى 100 حرف.',
++      groupNameDuplicate: 'توجد مجموعة بهذا الاسم بالفعل.',
++      groupCreateFailed: 'تعذر إنشاء مجموعة المشاريع',
++      groupUpdateFailed: 'تعذر تحديث مجموعة المشاريع',
++      moveToGroup: 'نقل إلى مجموعة',
++      ungrouped: 'غير مجمّع',
+       menu: 'إجراءات',
+       menuRename: 'إعادة تسمية',
+       menuAppearance: 'المظهر',
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index df70b4663..fd27d1b5b 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -2162,6 +2162,15 @@ export const en: Translations = {
+       primaryBadge: 'primary',
+       removeFolder: 'Remove',
+       create: 'Create',
++      createGroup: 'New group',
++      createGroupTitle: 'New project group',
++      groupNamePlaceholder: 'Group name',
++      groupNameInvalid: 'Enter a name between 1 and 100 characters.',
++      groupNameDuplicate: 'A group with this name already exists.',
++      groupCreateFailed: 'Could not create project group',
++      groupUpdateFailed: 'Could not update project group',
++      moveToGroup: 'Move to group',
++      ungrouped: 'Ungrouped',
+       menu: 'Actions',
+       menuRename: 'Rename',
+       menuAppearance: 'Appearance',
+diff --git a/apps/desktop/src/i18n/ja.ts b/apps/desktop/src/i18n/ja.ts
+index 0607f2260..0aae066d6 100644
+--- a/apps/desktop/src/i18n/ja.ts
++++ b/apps/desktop/src/i18n/ja.ts
+@@ -1874,6 +1874,15 @@ export const ja = defineLocale({
+       primaryBadge: 'メイン',
+       removeFolder: '削除',
+       create: '作成',
++      createGroup: '新しいグループ',
++      createGroupTitle: '新しいプロジェクトグループ',
++      groupNamePlaceholder: 'グループ名',
++      groupNameInvalid: '1〜100文字の名前を入力してください。',
++      groupNameDuplicate: '同じ名前のグループが既にあります。',
++      groupCreateFailed: 'プロジェクトグループを作成できませんでした',
++      groupUpdateFailed: 'プロジェクトグループを更新できませんでした',
++      moveToGroup: 'グループへ移動',
++      ungrouped: 'グループなし',
+       menu: 'アクション',
+       menuRename: '名前を変更',
+       menuAppearance: '外観',
+diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
+index ec1bd5314..f0e660c5d 100644
+--- a/apps/desktop/src/i18n/types.ts
++++ b/apps/desktop/src/i18n/types.ts
+@@ -1831,6 +1831,15 @@ export interface Translations {
+       primaryBadge: string
+       removeFolder: string
+       create: string
++      createGroup: string
++      createGroupTitle: string
++      groupNamePlaceholder: string
++      groupNameInvalid: string
++      groupNameDuplicate: string
++      groupCreateFailed: string
++      groupUpdateFailed: string
++      moveToGroup: string
++      ungrouped: string
+       menu: string
+       menuRename: string
+       menuAppearance: string
+diff --git a/apps/desktop/src/i18n/zh-hant.ts b/apps/desktop/src/i18n/zh-hant.ts
+index b9b55e049..e66aea890 100644
+--- a/apps/desktop/src/i18n/zh-hant.ts
++++ b/apps/desktop/src/i18n/zh-hant.ts
+@@ -1812,6 +1812,15 @@ export const zhHant = defineLocale({
+       primaryBadge: '主要',
+       removeFolder: '移除',
+       create: '建立',
++      createGroup: '新增群組',
++      createGroupTitle: '新增專案群組',
++      groupNamePlaceholder: '群組名稱',
++      groupNameInvalid: '請輸入 1 至 100 個字元的名稱。',
++      groupNameDuplicate: '已存在同名群組。',
++      groupCreateFailed: '無法建立專案群組',
++      groupUpdateFailed: '無法更新專案群組',
++      moveToGroup: '移至群組',
++      ungrouped: '未分組',
+       menu: '動作',
+       menuRename: '重新命名',
+       menuAppearance: '外觀',
+diff --git a/apps/desktop/src/i18n/zh.ts b/apps/desktop/src/i18n/zh.ts
+index f4bf71a4f..e21997d4e 100644
+--- a/apps/desktop/src/i18n/zh.ts
++++ b/apps/desktop/src/i18n/zh.ts
+@@ -2345,6 +2345,15 @@ export const zh: Translations = {
+       primaryBadge: '主',
+       removeFolder: '移除',
+       create: '创建',
++      createGroup: '新建分组',
++      createGroupTitle: '新建项目分组',
++      groupNamePlaceholder: '分组名称',
++      groupNameInvalid: '请输入 1 至 100 个字符的名称。',
++      groupNameDuplicate: '已存在同名分组。',
++      groupCreateFailed: '无法创建项目分组',
++      groupUpdateFailed: '无法更新项目分组',
++      moveToGroup: '移动到分组',
++      ungrouped: '未分组',
+       menu: '操作',
+       menuRename: '重命名',
+       menuAppearance: '外观',
+-- 
+2.50.1 (Apple Git-155)
+

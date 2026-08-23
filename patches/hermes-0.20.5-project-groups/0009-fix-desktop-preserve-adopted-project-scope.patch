@@ -1,0 +1,155 @@
+From bbcf6e0266ebe513f427e6cbe5c14284dd5b3946 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 02:42:08 +0300
+Subject: [PATCH 9/9] fix(desktop): preserve adopted project scope
+
+---
+ apps/desktop/src/store/projects.test.ts | 67 +++++++++++++++++++++++++
+ apps/desktop/src/store/projects.ts      | 35 ++++++++-----
+ 2 files changed, 89 insertions(+), 13 deletions(-)
+
+diff --git a/apps/desktop/src/store/projects.test.ts b/apps/desktop/src/store/projects.test.ts
+index 314467af5..15e5544cb 100644
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -526,6 +526,7 @@ describe('materializeAutoProject authority', () => {
+   beforeEach(() => {
+     vi.clearAllMocks()
+     $activeGatewayProfile.set('default')
++    $projectScope.set(ALL_PROJECTS)
+     setShowAllProfiles(false)
+     $projectsRpcAvailable.set(null)
+     $projects.set([])
+@@ -549,6 +550,72 @@ describe('materializeAutoProject authority', () => {
+     ])
+   })
+ 
++  it.each([
++    {
++      adopt: () => materializeAutoProject(autoProject),
++      label: 'grouping'
++    },
++    {
++      adopt: () => setProjectAppearance(autoProject, { color: '#123456' }),
++      label: 'appearance'
++    }
++  ])('keeps an entered auto Project open when $label adopts it', async ({ adopt }) => {
++    const patched = { ...authoritative, color: '#123456' }
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.list') return { active_id: null, projects: [listed] }
++      if (method === 'projects.get') return { project: authoritative }
++      if (method === 'projects.update') return { project: patched }
++      if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      throw new Error(`unexpected ${method}`)
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++    $projectTree.set([
++      {
++        id: autoProject.id,
++        isAuto: true,
++        label: autoProject.label,
++        path: autoProject.path,
++        repos: [],
++        sessionCount: 0
++      }
++    ])
++    $projectScope.set(autoProject.id)
++
++    await adopt()
++
++    expect($projectTree.get()[0]?.id).toBe(authoritative.id)
++    expect($projectScope.get()).toBe(authoritative.id)
++  })
++
++  it.each([
++    { label: 'another Project', scope: 'p_elsewhere' },
++    { label: 'no Project', scope: null }
++  ])('preserves $label scope when an auto Project is adopted', async ({ scope }) => {
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.list') return { active_id: null, projects: [listed] }
++      if (method === 'projects.get') return { project: authoritative }
++      if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      throw new Error(`unexpected ${method}`)
++    })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++    $projectTree.set([
++      {
++        id: autoProject.id,
++        isAuto: true,
++        label: autoProject.label,
++        path: autoProject.path,
++        repos: [],
++        sessionCount: 0
++      }
++    ])
++    $projectScope.set(scope as never)
++
++    await materializeAutoProject(autoProject)
++
++    expect($projectTree.get()[0]?.id).toBe(authoritative.id)
++    expect($projectScope.get()).toBe(scope)
++  })
++
+   it('immediately replaces the transient tree node so the adopted appearance is visible in its target group', async () => {
+     const previewSession = { cwd: '/repo', id: 'session-1', title: 'Current work' }
+     const transientTree = {
+diff --git a/apps/desktop/src/store/projects.ts b/apps/desktop/src/store/projects.ts
+index 375a1529b..387541e29 100644
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -1,4 +1,4 @@
+-import { atom } from 'nanostores'
++import { atom, batch } from 'nanostores'
+ 
+ import {
+   liveSessionProjectId,
+@@ -1068,17 +1068,7 @@ async function authoritativeProjectForPath(context: ActiveProjectsContext, path:
+   return project && !project.archived && findProjectByPath([project], path) ? project : null
+ }
+ 
+-function cacheMaterializedProject(
+-  context: ActiveProjectsContext,
+-  source: AutoProjectIdentity,
+-  project: ProjectInfo
+-): void {
+-  if (!stillOnProjectsContext(context)) return
+-
+-  const cached = $projects.get()
+-  const index = cached.findIndex(candidate => candidate.id === project.id)
+-  $projects.set(index === -1 ? [...cached, project] : cached.map((candidate, i) => (i === index ? project : candidate)))
+-
++function reconcileMaterializedProjectTree(source: AutoProjectIdentity, project: ProjectInfo): void {
+   const tree = $projectTree.get()
+   const transientMatches = (node: SidebarProjectTree): boolean =>
+     node.id === source.id || Boolean(node.isAuto && node.path && source.path && samePath(node.path, source.path))
+@@ -1109,7 +1099,26 @@ function cacheMaterializedProject(
+     }
+   }
+ 
+-  $projectTree.set(inserted ? next : [stable, ...next])
++  batch(() => {
++    $projectTree.set(inserted ? next : [stable, ...next])
++
++    if ($projectScope.get() === source.id) {
++      $projectScope.set(project.id)
++    }
++  })
++}
++
++function cacheMaterializedProject(
++  context: ActiveProjectsContext,
++  source: AutoProjectIdentity,
++  project: ProjectInfo
++): void {
++  if (!stillOnProjectsContext(context)) return
++
++  const cached = $projects.get()
++  const index = cached.findIndex(candidate => candidate.id === project.id)
++  $projects.set(index === -1 ? [...cached, project] : cached.map((candidate, i) => (i === index ? project : candidate)))
++  reconcileMaterializedProjectTree(source, project)
+ }
+ 
+ async function createMaterializedProject(
+-- 
+2.50.1 (Apple Git-155)
+

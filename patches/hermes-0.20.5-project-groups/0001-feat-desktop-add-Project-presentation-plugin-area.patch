@@ -1,0 +1,256 @@
+From 43a93c2f60e9443282876d70b698bb2d012f20e3 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 00:05:49 +0300
+Subject: [PATCH 1/9] feat(desktop): add Project presentation plugin area
+
+---
+ .../sidebar/projects-presentation.test.ts     | 58 ++++++++++++++
+ .../app/chat/sidebar/projects-presentation.ts | 79 +++++++++++++++++++
+ .../src/app/chat/sidebar/sessions-section.tsx | 35 ++++++++
+ apps/desktop/src/sdk/index.ts                 |  5 ++
+ 4 files changed, 177 insertions(+)
+ create mode 100644 apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+ create mode 100644 apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+new file mode 100644
+index 000000000..c5be060b8
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -0,0 +1,58 @@
++import { afterEach, describe, expect, it } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++
++import {
++  PROJECTS_PRESENTATION_AREA,
++  presentProjects,
++  type ProjectsPresentationContribution
++} from './projects-presentation'
++import type { SidebarProjectTree } from './projects'
++
++const project = (id: string): SidebarProjectTree =>
++  ({ id, label: id, path: `/work/${id}`, repos: [], sessionCount: 0, previewSessions: [] }) as SidebarProjectTree
++
++const disposers: Array<() => void> = []
++afterEach(() => {
++  while (disposers.length) disposers.pop()?.()
++})
++
++function register(data: ProjectsPresentationContribution, order = 0) {
++  disposers.push(registry.register({ area: PROJECTS_PRESENTATION_AREA, data, id: `provider-${order}`, order }))
++}
++
++describe('Projects presentation contribution', () => {
++  it('returns null without a provider so the built-in flat list is unchanged', () => {
++    expect(presentProjects([project('a')])).toBeNull()
++  })
++
++  it('groups known project ids and leaves unknown or unclaimed ids ungrouped', () => {
++    register({ groups: [{ id: 'cue', label: 'CUE++', projectIds: ['a', 'missing'] }] })
++
++    expect(presentProjects([project('a'), project('b')])).toEqual({
++      groups: [{ collapsed: false, id: 'cue', label: 'CUE++', projects: [project('a')] }],
++      ungrouped: [project('b')]
++    })
++  })
++
++  it('assigns a project only once when provider data contains duplicates', () => {
++    register({
++      groups: [
++        { id: 'one', label: 'One', projectIds: ['a'] },
++        { id: 'two', label: 'Two', projectIds: ['a', 'b'], collapsed: true }
++      ]
++    })
++
++    expect(presentProjects([project('a'), project('b')])?.groups).toEqual([
++      { collapsed: false, id: 'one', label: 'One', projects: [project('a')] },
++      { collapsed: true, id: 'two', label: 'Two', projects: [project('b')] }
++    ])
++  })
++
++  it('uses only the first ordered provider', () => {
++    register({ groups: [{ id: 'late', label: 'Late', projectIds: ['b'] }] }, 20)
++    register({ groups: [{ id: 'early', label: 'Early', projectIds: ['a'] }] }, 10)
++
++    expect(presentProjects([project('a'), project('b')])?.groups[0].id).toBe('early')
++  })
++})
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+new file mode 100644
+index 000000000..3c2b57284
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -0,0 +1,79 @@
++import { registry } from '@/contrib/registry'
++
++import type { SidebarProjectTree } from './projects'
++
++export const PROJECTS_PRESENTATION_AREA = 'projects.presentation'
++
++/** One plugin-defined group in the native Projects overview. Project ids that
++ * are absent from every group stay in the ordinary ungrouped list. */
++export interface ProjectPresentationGroup {
++  id: string
++  label: string
++  projectIds: string[]
++  collapsed?: boolean
++}
++
++/** A presentation provider is data-only: core keeps ownership of native rows,
++ * context menus, DnD, counts, worktrees, and project activation. */
++export interface ProjectsPresentationContribution {
++  groups: ProjectPresentationGroup[]
++}
++
++export interface PresentedProjectGroup {
++  id: string
++  label: string
++  projects: SidebarProjectTree[]
++  collapsed: boolean
++}
++
++export interface PresentedProjects {
++  groups: PresentedProjectGroup[]
++  ungrouped: SidebarProjectTree[]
++}
++
++/** Apply the first valid provider. A single owner avoids two plugins producing
++ * contradictory parentage for the same Project; lower `order` wins through the
++ * normal contribution registry ordering. Invalid ids and duplicates fail soft. */
++export function presentProjects(projects: SidebarProjectTree[]): PresentedProjects | null {
++  const provider = registry.getArea(PROJECTS_PRESENTATION_AREA)[0]
++  const data = provider?.data as Partial<ProjectsPresentationContribution> | undefined
++
++  if (!Array.isArray(data?.groups)) {
++    return null
++  }
++
++  const byId = new Map(projects.map(project => [project.id, project]))
++  const claimed = new Set<string>()
++  const groupIds = new Set<string>()
++  const groups: PresentedProjectGroup[] = []
++
++  for (const raw of data.groups) {
++    const id = String(raw?.id ?? '').trim()
++    const label = String(raw?.label ?? '').trim()
++
++    if (!id || !label || groupIds.has(id) || !Array.isArray(raw?.projectIds)) {
++      continue
++    }
++
++    groupIds.add(id)
++    const rows: SidebarProjectTree[] = []
++
++    for (const projectId of raw.projectIds) {
++      if (typeof projectId !== 'string' || claimed.has(projectId)) {
++        continue
++      }
++      const project = byId.get(projectId)
++      if (project) {
++        claimed.add(projectId)
++        rows.push(project)
++      }
++    }
++
++    groups.push({ collapsed: raw.collapsed === true, id, label, projects: rows })
++  }
++
++  return {
++    groups,
++    ungrouped: projects.filter(project => !claimed.has(project.id))
++  }
++}
+diff --git a/apps/desktop/src/app/chat/sidebar/sessions-section.tsx b/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
+index 0cb28700e..d6e0f6d36 100644
+--- a/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
++++ b/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
+@@ -9,6 +9,7 @@ import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar'
+ import type { HermesGitWorktree } from '@/global'
+ import type { SessionInfo } from '@/hermes'
+ import { useI18n } from '@/i18n'
++import { useContributions } from '@/contrib/react/use-contributions'
+ import { flattenSessionsWithBranches } from '@/lib/session-branch-tree'
+ import {
+   groupEntriesByRecency,
+@@ -22,6 +23,7 @@ import { sessionPinId } from '@/store/session'
+ import { $sessionDotStateById, hasLiveTurn } from '@/store/session-dot-state'
+ 
+ import { SidebarDateDivider, SidebarSectionMeta } from './chrome'
++import { PROJECTS_PRESENTATION_AREA, presentProjects } from './projects-presentation'
+ import { orderRowsWithinGroups, reorderableRowIds } from './order'
+ import {
+   EnteredProjectContent,
+@@ -215,6 +217,9 @@ export function SidebarSessionsSection({
+   card = false
+ }: SidebarSessionsSectionProps) {
+   const { t } = useI18n()
++  // Subscribe so a runtime plugin re-registration immediately re-resolves the
++  // native Project overview instead of waiting for unrelated sidebar state.
++  useContributions(PROJECTS_PRESENTATION_AREA)
+   const dividerLabels = t.sidebar.dateDivider
+   const statusDividerLabels = t.sidebar.statusDivider
+   const dotStates = useStore($sessionDotStateById)
+@@ -404,6 +409,35 @@ export function SidebarSessionsSection({
+   } else if (showEmptyState) {
+     inner = emptyState
+   } else if (projectOverview?.length) {
++    const presented = presentProjects(projectOverview)
++
++    if (presented) {
++      const nativeRow = (project: SidebarProjectTree) => (
++        <ProjectOverviewRow
++          activeProjectId={activeProjectId}
++          key={project.id}
++          onEnter={onEnterProject}
++          onNewSession={onNewSessionInWorkspace}
++          previewSessions={projectOverviewPreviews?.[project.id]}
++          project={project}
++          renderRows={renderRows}
++        />
++      )
++
++      inner = (
++        <>
++          {presented.groups.map(group => (
++            <div className="pb-1" key={group.id}>
++              <div className="px-2 pb-1 pt-1.5 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
++                {group.label}
++              </div>
++              {!group.collapsed && group.projects.map(nativeRow)}
++            </div>
++          ))}
++          {presented.ungrouped.map(nativeRow)}
++        </>
++      )
++    } else {
+     // The model is already ordered (Home leads; then the default sort groups
+     // explicit-before-auto, with a manual drag-order winning when present).
+     // Render in that order and make rows drag-to-reorder when a handler is
+@@ -443,6 +477,7 @@ export function SidebarSessionsSection({
+         )}
+       </>
+     )
++    }
+   } else if (groups?.length) {
+     // Profile/source groups never reorder; render them flat with static rows.
+     inner = groups.map(group => (
+diff --git a/apps/desktop/src/sdk/index.ts b/apps/desktop/src/sdk/index.ts
+index befb2bf46..6a187a8de 100644
+--- a/apps/desktop/src/sdk/index.ts
++++ b/apps/desktop/src/sdk/index.ts
+@@ -1169,6 +1169,11 @@ export {
+ 
+ export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
+ export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
++export {
++  type ProjectPresentationGroup,
++  PROJECTS_PRESENTATION_AREA,
++  type ProjectsPresentationContribution
++} from '@/app/chat/sidebar/projects-presentation'
+ /** THE full per-toolset config panel core Settings renders — provider picker,
+  *  env vars / API keys, model catalog picker, and post-setup runners. Route-
+  *  decoupled (the "manage keys" deep link is a no-op outside the router); pass
+-- 
+2.50.1 (Apple Git-155)
+

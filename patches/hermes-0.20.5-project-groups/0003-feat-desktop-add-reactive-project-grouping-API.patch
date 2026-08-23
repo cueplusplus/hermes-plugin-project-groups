@@ -1,0 +1,333 @@
+From 810a4cb801e79c64c2f15f2b6b057b94cf199e4d Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 01:35:02 +0300
+Subject: [PATCH 3/9] feat(desktop): add reactive project grouping API
+
+---
+ .../sidebar/projects-presentation.test.ts     |  81 ++++++----
+ .../app/chat/sidebar/projects-presentation.ts | 151 ++++++++++++------
+ apps/desktop/src/sdk/index.ts                 |   7 +-
+ 3 files changed, 158 insertions(+), 81 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index c5be060b8..ff58f7bb9 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -1,58 +1,79 @@
+-import { afterEach, describe, expect, it } from 'vitest'
++import { afterEach, describe, expect, it, vi } from 'vitest'
+ 
+ import { registry } from '@/contrib/registry'
+ 
+ import {
+-  PROJECTS_PRESENTATION_AREA,
+-  presentProjects,
+-  type ProjectsPresentationContribution
++  type ProjectGroupDescriptor,
++  PROJECTS_GROUPING_AREA,
++  resolveProjectsGrouping,
++  type ProjectsGroupingContribution
+ } from './projects-presentation'
+ import type { SidebarProjectTree } from './projects'
+ 
+-const project = (id: string): SidebarProjectTree =>
+-  ({ id, label: id, path: `/work/${id}`, repos: [], sessionCount: 0, previewSessions: [] }) as SidebarProjectTree
++const project = (id: string, isNoProject = false): SidebarProjectTree =>
++  ({
++    id,
++    isNoProject,
++    label: id,
++    path: `/work/${id}`,
++    repos: [],
++    sessionCount: 0,
++    previewSessions: []
++  }) as SidebarProjectTree
+ 
+ const disposers: Array<() => void> = []
+ afterEach(() => {
+   while (disposers.length) disposers.pop()?.()
+ })
+ 
+-function register(data: ProjectsPresentationContribution, order = 0) {
+-  disposers.push(registry.register({ area: PROJECTS_PRESENTATION_AREA, data, id: `provider-${order}`, order }))
++function provider(groups: readonly ProjectGroupDescriptor[]): ProjectsGroupingContribution {
++  const snapshot = { groups }
++  return { getSnapshot: () => snapshot, subscribe: () => () => undefined }
+ }
+ 
+-describe('Projects presentation contribution', () => {
++function register(data: unknown, order = 0) {
++  disposers.push(registry.register({ area: PROJECTS_GROUPING_AREA, data, id: `provider-${order}`, order }))
++}
++
++describe('Projects grouping contribution', () => {
+   it('returns null without a provider so the built-in flat list is unchanged', () => {
+-    expect(presentProjects([project('a')])).toBeNull()
++    expect(resolveProjectsGrouping([project('a')])).toBeNull()
+   })
+ 
+-  it('groups known project ids and leaves unknown or unclaimed ids ungrouped', () => {
+-    register({ groups: [{ id: 'cue', label: 'CUE++', projectIds: ['a', 'missing'] }] })
++  it('skips a malformed higher-priority contribution', () => {
++    register({ groups: [] }, 0)
++    register(provider([{ id: 'valid', label: 'Valid', projectIds: ['a'] }]), 10)
+ 
+-    expect(presentProjects([project('a'), project('b')])).toEqual({
+-      groups: [{ collapsed: false, id: 'cue', label: 'CUE++', projects: [project('a')] }],
+-      ungrouped: [project('b')]
+-    })
++    expect(resolveProjectsGrouping([project('a')])?.groups[0].id).toBe('valid')
+   })
+ 
+-  it('assigns a project only once when provider data contains duplicates', () => {
+-    register({
++  it('keeps Home fixed and sends stale, duplicate and omitted ids to core Ungrouped', () => {
++    register(
++      provider([
++        { id: ' one ', label: ' One ', projectIds: ['a', 'missing', 'a'] },
++        { id: 'two', label: 'Two', projectIds: ['a', 'b'], collapsed: true },
++        { id: 'two', label: 'Duplicate', projectIds: ['c'] }
++      ])
++    )
++
++    expect(resolveProjectsGrouping([project('home', true), project('a'), project('b'), project('c')])).toEqual({
++      contribution: expect.any(Object),
+       groups: [
+-        { id: 'one', label: 'One', projectIds: ['a'] },
+-        { id: 'two', label: 'Two', projectIds: ['a', 'b'], collapsed: true }
+-      ]
++        { collapsed: false, id: 'one', label: 'One', projects: [project('a')] },
++        { collapsed: true, id: 'two', label: 'Two', projects: [project('b')] }
++      ],
++      home: project('home', true),
++      snapshot: expect.any(Object),
++      ungrouped: [project('c')]
+     })
+-
+-    expect(presentProjects([project('a'), project('b')])?.groups).toEqual([
+-      { collapsed: false, id: 'one', label: 'One', projects: [project('a')] },
+-      { collapsed: true, id: 'two', label: 'Two', projects: [project('b')] }
+-    ])
+   })
+ 
+-  it('uses only the first ordered provider', () => {
+-    register({ groups: [{ id: 'late', label: 'Late', projectIds: ['b'] }] }, 20)
+-    register({ groups: [{ id: 'early', label: 'Early', projectIds: ['a'] }] }, 10)
++  it('uses deterministic contribution ordering and reads one stable snapshot', () => {
++    const getSnapshot = vi.fn(() => ({ groups: [{ id: 'early', label: 'Early', projectIds: ['a'] }] }))
++    register(provider([{ id: 'late', label: 'Late', projectIds: ['b'] }]), 20)
++    register({ getSnapshot, subscribe: () => () => undefined }, 10)
+ 
+-    expect(presentProjects([project('a'), project('b')])?.groups[0].id).toBe('early')
++    expect(resolveProjectsGrouping([project('a'), project('b')])?.groups[0].id).toBe('early')
++    expect(getSnapshot).toHaveBeenCalledTimes(1)
+   })
+ })
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index 3c2b57284..ff0382c1c 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -1,79 +1,134 @@
++import { useSyncExternalStore } from 'react'
++
++import { useContributions } from '@/contrib/react/use-contributions'
+ import { registry } from '@/contrib/registry'
+ 
+ import type { SidebarProjectTree } from './projects'
+ 
+-export const PROJECTS_PRESENTATION_AREA = 'projects.presentation'
++export const PROJECTS_GROUPING_AREA = 'projects.grouping'
++
++export interface ProjectGroupDescriptor {
++  readonly id: string
++  readonly label: string
++  readonly projectIds: readonly string[]
++  readonly collapsed?: boolean
++}
+ 
+-/** One plugin-defined group in the native Projects overview. Project ids that
+- * are absent from every group stay in the ordinary ungrouped list. */
+-export interface ProjectPresentationGroup {
+-  id: string
+-  label: string
+-  projectIds: string[]
+-  collapsed?: boolean
++export interface ProjectsGroupingSnapshot {
++  readonly groups: readonly ProjectGroupDescriptor[]
+ }
+ 
+-/** A presentation provider is data-only: core keeps ownership of native rows,
+- * context menus, DnD, counts, worktrees, and project activation. */
+-export interface ProjectsPresentationContribution {
+-  groups: ProjectPresentationGroup[]
++export interface ProjectsGroupingContribution {
++  getSnapshot(): ProjectsGroupingSnapshot
++  subscribe(listener: () => void): () => void
++  createGroup?(name: string): Promise<void> | void
++  assignProject?(projectId: string, groupId: string | null): Promise<void> | void
++  setGroupCollapsed?(groupId: string, collapsed: boolean): Promise<void> | void
+ }
+ 
+ export interface PresentedProjectGroup {
+-  id: string
+-  label: string
+-  projects: SidebarProjectTree[]
+-  collapsed: boolean
++  readonly id: string
++  readonly label: string
++  readonly projects: readonly SidebarProjectTree[]
++  readonly collapsed: boolean
+ }
+ 
+-export interface PresentedProjects {
+-  groups: PresentedProjectGroup[]
+-  ungrouped: SidebarProjectTree[]
++export interface PresentedProjectsGrouping {
++  readonly contribution: ProjectsGroupingContribution
++  readonly snapshot: ProjectsGroupingSnapshot
++  readonly home?: SidebarProjectTree
++  readonly groups: readonly PresentedProjectGroup[]
++  readonly ungrouped: readonly SidebarProjectTree[]
+ }
+ 
+-/** Apply the first valid provider. A single owner avoids two plugins producing
+- * contradictory parentage for the same Project; lower `order` wins through the
+- * normal contribution registry ordering. Invalid ids and duplicates fail soft. */
+-export function presentProjects(projects: SidebarProjectTree[]): PresentedProjects | null {
+-  const provider = registry.getArea(PROJECTS_PRESENTATION_AREA)[0]
+-  const data = provider?.data as Partial<ProjectsPresentationContribution> | undefined
++function readValidProvider(): {
++  contribution: ProjectsGroupingContribution
++  snapshot: ProjectsGroupingSnapshot
++} | null {
++  for (const entry of registry.getArea(PROJECTS_GROUPING_AREA)) {
++    const contribution = entry.data as Partial<ProjectsGroupingContribution> | undefined
++    if (typeof contribution?.getSnapshot !== 'function' || typeof contribution.subscribe !== 'function') continue
+ 
+-  if (!Array.isArray(data?.groups)) {
+-    return null
++    try {
++      const snapshot = contribution.getSnapshot()
++      if (snapshot && Array.isArray(snapshot.groups)) {
++        return { contribution: contribution as ProjectsGroupingContribution, snapshot }
++      }
++    } catch {
++      // A malformed provider must not suppress a valid lower-priority provider.
++    }
+   }
++  return null
++}
++
++export function resolveProjectsGrouping(projects: readonly SidebarProjectTree[]): PresentedProjectsGrouping | null {
++  const active = readValidProvider()
++  return active ? resolveProjectsGroupingFrom(active.contribution, active.snapshot, projects) : null
++}
+ 
+-  const byId = new Map(projects.map(project => [project.id, project]))
++function resolveProjectsGroupingFrom(
++  contribution: ProjectsGroupingContribution,
++  snapshot: ProjectsGroupingSnapshot,
++  projects: readonly SidebarProjectTree[]
++): PresentedProjectsGrouping {
++  const home = projects.find(project => project.isNoProject)
++  const realProjects = projects.filter(project => !project.isNoProject)
++  const byId = new Map(realProjects.map(project => [project.id, project]))
+   const claimed = new Set<string>()
+   const groupIds = new Set<string>()
+   const groups: PresentedProjectGroup[] = []
+ 
+-  for (const raw of data.groups) {
+-    const id = String(raw?.id ?? '').trim()
+-    const label = String(raw?.label ?? '').trim()
+-
+-    if (!id || !label || groupIds.has(id) || !Array.isArray(raw?.projectIds)) {
+-      continue
+-    }
++  for (const raw of snapshot.groups) {
++    const id = typeof raw?.id === 'string' ? raw.id.trim() : ''
++    const label = typeof raw?.label === 'string' ? raw.label.trim() : ''
++    if (!id || !label || groupIds.has(id) || !Array.isArray(raw?.projectIds)) continue
+ 
+     groupIds.add(id)
+-    const rows: SidebarProjectTree[] = []
+-
+-    for (const projectId of raw.projectIds) {
+-      if (typeof projectId !== 'string' || claimed.has(projectId)) {
+-        continue
+-      }
++    const groupProjects: SidebarProjectTree[] = []
++    for (const rawProjectId of raw.projectIds) {
++      if (typeof rawProjectId !== 'string') continue
++      const projectId = rawProjectId.trim()
++      if (!projectId || claimed.has(projectId)) continue
+       const project = byId.get(projectId)
+-      if (project) {
+-        claimed.add(projectId)
+-        rows.push(project)
+-      }
++      if (!project) continue
++      claimed.add(projectId)
++      groupProjects.push(project)
+     }
+-
+-    groups.push({ collapsed: raw.collapsed === true, id, label, projects: rows })
++    groups.push({ collapsed: raw.collapsed === true, id, label, projects: groupProjects })
+   }
+ 
+   return {
++    contribution,
+     groups,
+-    ungrouped: projects.filter(project => !claimed.has(project.id))
++    home,
++    snapshot,
++    ungrouped: realProjects.filter(project => !claimed.has(project.id))
+   }
+ }
++
++const EMPTY_SUBSCRIBE = () => () => undefined
++const NULL_SNAPSHOT = () => null
++
++export function useProjectsGrouping(projects: readonly SidebarProjectTree[]): PresentedProjectsGrouping | null {
++  useContributions(PROJECTS_GROUPING_AREA)
++  const active = readValidProvider()
++  const snapshot = useSyncExternalStore(
++    active ? active.contribution.subscribe : EMPTY_SUBSCRIBE,
++    active ? active.contribution.getSnapshot : NULL_SNAPSHOT,
++    active ? active.contribution.getSnapshot : NULL_SNAPSHOT
++  )
++
++  if (!active || !snapshot || !Array.isArray(snapshot.groups)) return null
++  return resolveProjectsGroupingFrom(active.contribution, snapshot, projects)
++}
++
++export function useActiveProjectsGrouping() {
++  useContributions(PROJECTS_GROUPING_AREA)
++  const active = readValidProvider()
++  const snapshot = useSyncExternalStore(
++    active ? active.contribution.subscribe : EMPTY_SUBSCRIBE,
++    active ? active.contribution.getSnapshot : NULL_SNAPSHOT,
++    active ? active.contribution.getSnapshot : NULL_SNAPSHOT
++  )
++  return active && snapshot && Array.isArray(snapshot.groups) ? { contribution: active.contribution, snapshot } : null
++}
+diff --git a/apps/desktop/src/sdk/index.ts b/apps/desktop/src/sdk/index.ts
+index 6a187a8de..c1ef9a2cb 100644
+--- a/apps/desktop/src/sdk/index.ts
++++ b/apps/desktop/src/sdk/index.ts
+@@ -1170,9 +1170,10 @@ export {
+ export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
+ export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
+ export {
+-  type ProjectPresentationGroup,
+-  PROJECTS_PRESENTATION_AREA,
+-  type ProjectsPresentationContribution
++  type ProjectGroupDescriptor,
++  PROJECTS_GROUPING_AREA,
++  type ProjectsGroupingContribution,
++  type ProjectsGroupingSnapshot
+ } from '@/app/chat/sidebar/projects-presentation'
+ /** THE full per-toolset config panel core Settings renders — provider picker,
+  *  env vars / API keys, model catalog picker, and post-setup runners. Route-
+-- 
+2.50.1 (Apple Git-155)
+
