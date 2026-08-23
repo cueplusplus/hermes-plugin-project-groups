@@ -1,6 +1,9 @@
+import { host } from '@hermes/plugin-sdk'
+
 const ID = 'project-groups'
 const GROUPING_AREA = 'projects.grouping'
 const STORAGE_KEY = 'state.v1'
+const MUTATION_CAPABILITIES = ['createGroup', 'assignProject', 'setGroupCollapsed']
 const DEFAULT_GROUPS = [
   { id: 'cue', name: 'CUE++', collapsed: false },
   { id: 'rgc-labs', name: 'RGC-LABS', collapsed: false },
@@ -9,6 +12,27 @@ const DEFAULT_GROUPS = [
 
 const cleanText = value => (typeof value === 'string' ? value.trim().replace(/\s+/gu, ' ') : '')
 const utf16Length = value => value.length
+const truncateUtf16 = (value, maxUnits) => {
+  let result = ''
+  for (const character of value) {
+    if (utf16Length(result) + utf16Length(character) > maxUnits) break
+    result += character
+  }
+  return result
+}
+
+const uniqueLegacyText = (value, used, maxUnits, label) => {
+  const base = truncateUtf16(value, maxUnits)
+  let candidate = base
+  let index = 2
+  while (used.has(candidate.toLowerCase())) {
+    const suffix = label ? ` (${index})` : `-${index}`
+    candidate = `${truncateUtf16(base, maxUnits - utf16Length(suffix))}${suffix}`
+    index += 1
+  }
+  used.add(candidate.toLowerCase())
+  return candidate
+}
 
 function normalizeState(input = {}) {
   const source = input && typeof input === 'object' && input.state && !input.groups ? input.state : input
@@ -50,6 +74,48 @@ function normalizeState(input = {}) {
   return { version: 1, groups, assignments, projectOrder }
 }
 
+function normalizeLegacyState(input = {}) {
+  const source = input && typeof input === 'object' && input.state && !input.groups ? input.state : input
+  const groups = []
+  const groupIds = new Set()
+  const groupNames = new Set()
+  const idAliases = new Map()
+
+  for (const [index, raw] of (Array.isArray(source?.groups) ? source.groups : []).entries()) {
+    const rawId = cleanText(raw?.id)
+    const rawName = cleanText(raw?.name ?? raw?.label)
+    const id = uniqueLegacyText(rawId || `group-${index + 1}`, groupIds, 200, false)
+    const name = uniqueLegacyText(rawName || 'Untitled group', groupNames, 100, true)
+    if (rawId && !idAliases.has(rawId)) idAliases.set(rawId, id)
+    groups.push({ id, name, collapsed: raw?.collapsed === true })
+  }
+
+  const assignments = {}
+  const rawAssignments = source?.assignments && typeof source.assignments === 'object' ? source.assignments : {}
+  for (const [rawProjectId, rawGroupId] of Object.entries(rawAssignments)) {
+    const projectId = cleanText(rawProjectId)
+    const groupId = idAliases.get(cleanText(rawGroupId))
+    if (projectId && groupId) assignments[projectId] = groupId
+  }
+
+  const projectOrder = {}
+  const rawOrder = source?.projectOrder && typeof source.projectOrder === 'object' ? source.projectOrder : {}
+  for (const [rawGroupId, rawProjectIds] of Object.entries(rawOrder)) {
+    const groupId = idAliases.get(cleanText(rawGroupId))
+    if (!groupId || !Array.isArray(rawProjectIds)) continue
+    const seen = new Set(projectOrder[groupId] ?? [])
+    projectOrder[groupId] = [...seen]
+    for (const rawProjectId of rawProjectIds) {
+      const projectId = cleanText(rawProjectId)
+      if (!projectId || seen.has(projectId)) continue
+      seen.add(projectId)
+      projectOrder[groupId].push(projectId)
+    }
+  }
+
+  return { version: 1, groups, assignments, projectOrder }
+}
+
 function toSnapshot(state) {
   const groups = state.groups.map(group => {
     const assigned = Object.entries(state.assignments)
@@ -72,14 +138,17 @@ function responseState(response) {
   if (!response?.state || typeof response.state !== 'object' || !Array.isArray(response.state.groups)) {
     throw new Error('Project Groups backend returned invalid state')
   }
-  return normalizeState(response.state)
+  return normalizeLegacyState(response.state)
 }
 
 function createProvider(ctx) {
-  const cached = normalizeState(ctx.storage.get(STORAGE_KEY, { groups: DEFAULT_GROUPS }))
+  const cached = normalizeLegacyState(ctx.storage.get(STORAGE_KEY, { groups: DEFAULT_GROUPS }))
   const listeners = new Set()
+  let currentState = cached
   let snapshot = toSnapshot(cached)
   let mutationQueue = Promise.resolve()
+  let authority = `${host.state.connectionId?.get?.() ?? ''}\u0000${host.state.profile?.get?.() ?? ''}`
+  let generation = 0
 
   const provider = {
     getSnapshot: () => snapshot,
@@ -90,14 +159,29 @@ function createProvider(ctx) {
   }
 
   const publishBackendState = state => {
+    currentState = state
     ctx.storage.set(STORAGE_KEY, state)
     snapshot = toSnapshot(state)
     for (const listener of [...listeners]) listener()
   }
 
+  const publishTransientState = state => {
+    currentState = state
+    snapshot = toSnapshot(state)
+    for (const listener of [...listeners]) listener()
+  }
+
   const mutate = (path, method, body) => {
+    const requestGeneration = generation
+    const requestAuthority = authority
     const request = async () => {
+      if (generation !== requestGeneration || authority !== requestAuthority) {
+        throw new Error('Active Project Groups backend changed before mutation')
+      }
       const response = await ctx.rest(path, { method, body, timeoutMs: 5_000 })
+      if (generation !== requestGeneration || authority !== requestAuthority) {
+        throw new Error('Active Project Groups backend changed during mutation')
+      }
       const state = responseState(response)
       publishBackendState(state)
     }
@@ -118,25 +202,71 @@ function createProvider(ctx) {
     provider.setGroupCollapsed = setGroupCollapsed
   }
 
-  const start = async () => {
+  const disableMutations = () => {
+    delete provider.createGroup
+    delete provider.assignProject
+    delete provider.setGroupCollapsed
+  }
+
+  const load = async (requestGeneration, migrationState) => {
+    let state
     try {
       let response = await ctx.rest('/state', { timeoutMs: 5_000 })
       if (response?.state == null) {
+        if (generation !== requestGeneration) return
         response = await ctx.rest('/state/migrate', {
           method: 'POST',
-          body: { state: cached },
+          body: { state: migrationState },
           timeoutMs: 5_000
         })
       }
-      const state = responseState(response)
-      enableMutations()
-      publishBackendState(state)
+      if (generation !== requestGeneration) return
+      state = responseState(response)
     } catch {
       // The cached snapshot remains available, without mutation callbacks.
+      return
     }
+
+    try {
+      const capabilities = await ctx.rest('/capabilities', { timeoutMs: 5_000 })
+      if (generation !== requestGeneration) return
+      if (Array.isArray(capabilities?.mutations) && MUTATION_CAPABILITIES.every(item => capabilities.mutations.includes(item))) {
+        enableMutations()
+      }
+    } catch {
+      // State from a v0.2 backend remains visible without mutation callbacks.
+    }
+
+    if (generation === requestGeneration) publishBackendState(state)
   }
 
-  return { provider, start }
+  const reloadAuthority = () => {
+    const nextAuthority = `${host.state.connectionId?.get?.() ?? ''}\u0000${host.state.profile?.get?.() ?? ''}`
+    if (nextAuthority === authority) return
+    authority = nextAuthority
+    generation += 1
+    disableMutations()
+    publishTransientState(normalizeState({ groups: [] }))
+    void load(generation, normalizeState({ groups: [] }))
+  }
+
+  const reloadGateway = state => {
+    generation += 1
+    disableMutations()
+    if (state === 'open') void load(generation, currentState)
+    else publishTransientState(currentState)
+  }
+
+  const disposeProfile = host.state.profile?.listen?.(reloadAuthority)
+  const disposeConnection = host.state.connectionId?.listen?.(reloadAuthority)
+  const disposeGateway = host.state.gateway?.listen?.(reloadGateway)
+  ctx.onDispose?.(() => {
+    disposeProfile?.()
+    disposeConnection?.()
+    disposeGateway?.()
+  })
+
+  return { provider, start: () => load(generation, cached) }
 }
 
 export default {

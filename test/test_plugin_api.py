@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -81,6 +82,12 @@ class ProjectGroupsApiTest(unittest.TestCase):
         self.assertEqual(unassigned["state"]["assignments"], {})
         self.assertEqual(module._read_state(), unassigned["state"])
 
+    def test_capabilities_advertise_all_native_grouping_mutations(self):
+        self.assertEqual(asyncio.run(module.get_capabilities()), {
+            "mutations": ["createGroup", "assignProject", "setGroupCollapsed"],
+            "version": 1,
+        })
+
     def test_create_group_rejects_case_insensitive_duplicate(self):
         asyncio.run(module.create_group(module.CreateGroupEnvelope(name="CUE++")))
 
@@ -103,6 +110,40 @@ class ProjectGroupsApiTest(unittest.TestCase):
             "groups": [{"id": "other", "name": "Other"}],
         })))
         self.assertEqual(existing["state"], migrated["state"])
+
+    def test_reads_and_repairs_v02_state_without_losing_groups_or_assignments(self):
+        legacy = {
+            "version": 1,
+            "groups": [
+                {"id": "long", "name": "L" * 101},
+                {"id": "duplicate-1", "name": "Shared label"},
+                {"id": "duplicate-2", "name": " shared   label "},
+            ],
+            "assignments": {
+                "projectLong": "long",
+                "projectOne": "duplicate-1",
+                "projectTwo": "duplicate-2",
+            },
+            "projectOrder": {
+                "long": ["projectLong"],
+                "duplicate-1": ["projectOne"],
+                "duplicate-2": ["projectTwo"],
+            },
+        }
+        path = module._state_path()
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        repaired = module._read_state()
+
+        self.assertEqual([(group["id"], group["name"]) for group in repaired["groups"]], [
+            ("long", "L" * 100),
+            ("duplicate-1", "Shared label"),
+            ("duplicate-2", "shared label (2)"),
+        ])
+        self.assertEqual(repaired["assignments"], legacy["assignments"])
+        self.assertEqual(repaired["projectOrder"], legacy["projectOrder"])
+        self.assertEqual(module._read_state(), repaired)
 
     def test_mutations_cannot_cross_persisted_collection_bounds(self):
         original_groups = module._MAX_GROUPS

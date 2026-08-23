@@ -86,18 +86,60 @@ def _clean_text(value: Any, *, field: str, max_units: int = _MAX_TEXT) -> str:
     return text
 
 
-def normalize_state(raw: Any) -> dict[str, Any]:
+def _truncate_utf16(value: str, max_units: int) -> str:
+    result = ""
+    units = 0
+    for character in value:
+        character_units = _utf16_units(character)
+        if units + character_units > max_units:
+            break
+        result += character
+        units += character_units
+    return result
+
+
+def _unique_legacy_text(value: str, used: set[str], *, max_units: int, label: bool) -> str:
+    base = _truncate_utf16(value, max_units)
+    candidate = base
+    index = 2
+    while candidate.casefold() in used:
+        suffix = f" ({index})" if label else f"-{index}"
+        candidate = f"{_truncate_utf16(base, max_units - _utf16_units(suffix))}{suffix}"
+        index += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
+def normalize_state(raw: Any, *, repair_legacy: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("state must be an object")
 
     groups: list[dict[str, Any]] = []
     group_ids: set[str] = set()
+    legacy_group_ids: set[str] = set()
     group_names: set[str] = set()
-    for item in raw.get("groups", []):
+    id_aliases: dict[str, str] = {}
+    for index, item in enumerate(raw.get("groups", [])):
         if len(groups) >= _MAX_GROUPS:
             raise ValueError(f"groups exceeds {_MAX_GROUPS}")
         if not isinstance(item, dict):
             continue
+        if repair_legacy:
+            raw_group_id = " ".join(item.get("id", "").strip().split()) if isinstance(item.get("id"), str) else ""
+            raw_name = item.get("name", item.get("label"))
+            raw_name = " ".join(raw_name.strip().split()) if isinstance(raw_name, str) else ""
+            group_id = _unique_legacy_text(
+                raw_group_id or f"group-{index + 1}", legacy_group_ids, max_units=_MAX_TEXT, label=False
+            )
+            name = _unique_legacy_text(
+                raw_name or "Untitled group", group_names, max_units=_MAX_GROUP_NAME, label=True
+            )
+            if raw_group_id and raw_group_id not in id_aliases:
+                id_aliases[raw_group_id] = group_id
+            group_ids.add(group_id)
+            groups.append({"id": group_id, "name": name, "collapsed": item.get("collapsed") is True})
+            continue
+
         group_id = _clean_text(item.get("id"), field="group id")
         name = _clean_text(item.get("name"), field="group name", max_units=_MAX_GROUP_NAME)
         folded_name = name.casefold()
@@ -113,14 +155,24 @@ def normalize_state(raw: Any) -> dict[str, Any]:
         if len(raw_assignments) > _MAX_ASSIGNMENTS:
             raise ValueError(f"assignments exceeds {_MAX_ASSIGNMENTS}")
         for project_id, group_id in raw_assignments.items():
-            if isinstance(project_id, str) and isinstance(group_id, str) and group_id in group_ids:
-                assignments[_clean_text(project_id, field="project id")] = group_id
+            resolved_group_id = (
+                id_aliases.get(" ".join(group_id.strip().split()))
+                if repair_legacy and isinstance(group_id, str)
+                else group_id
+            )
+            if isinstance(project_id, str) and isinstance(resolved_group_id, str) and resolved_group_id in group_ids:
+                assignments[_clean_text(project_id, field="project id")] = resolved_group_id
 
     project_order: dict[str, list[str]] = {}
     raw_order = raw.get("projectOrder", {})
     if isinstance(raw_order, dict):
         total = 0
-        for group_id, project_ids in raw_order.items():
+        for raw_group_id, project_ids in raw_order.items():
+            group_id = (
+                id_aliases.get(" ".join(raw_group_id.strip().split()))
+                if repair_legacy and isinstance(raw_group_id, str)
+                else raw_group_id
+            )
             if group_id not in group_ids and group_id != "__ungrouped__":
                 continue
             if not isinstance(project_ids, list):
@@ -169,7 +221,7 @@ def _read_state() -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return normalize_state(json.loads(path.read_text(encoding="utf-8")))
+        return normalize_state(json.loads(path.read_text(encoding="utf-8")), repair_legacy=True)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=f"Stored Project Groups state is invalid: {exc}") from exc
 
@@ -186,6 +238,14 @@ def _validation_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(exc))
 
 
+@router.get("/capabilities")
+async def get_capabilities():
+    return {
+        "mutations": ["createGroup", "assignProject", "setGroupCollapsed"],
+        "version": _SCHEMA_VERSION,
+    }
+
+
 @router.get("/state")
 async def get_state():
     with _LOCK:
@@ -196,7 +256,7 @@ async def get_state():
 @router.post("/state/migrate")
 async def migrate_state(envelope: StateEnvelope):
     try:
-        migrated = normalize_state(envelope.state)
+        migrated = normalize_state(envelope.state, repair_legacy=True)
     except ValueError as exc:
         raise _validation_error(exc) from exc
     with _LOCK:
