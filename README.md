@@ -23,6 +23,8 @@ A shareable runtime plugin for **Hermes Desktop** that organizes flat Hermes Pro
 
 ## Install
 
+> Requires a Hermes build with unified Desktop plugins and backend plugin APIs (current 2026 Desktop line). Native inline sidebar grouping additionally requires the upstream `projects.presentation` SDK contribution proposed in [NousResearch/hermes-agent#93229](https://github.com/NousResearch/hermes-agent/pull/93229); older builds still get the dedicated Project Groups page.
+
 ### One-click Desktop install
 
 [Install Project Groups in Hermes](hermes://plugin/install?repo=cueplusplus/hermes-plugin-project-groups)
