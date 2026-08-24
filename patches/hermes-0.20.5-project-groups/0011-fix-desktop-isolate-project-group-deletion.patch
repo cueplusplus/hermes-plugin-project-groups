@@ -1,7 +1,7 @@
-From 64459518314d97bbc92275fc2674fd53da432533 Mon Sep 17 00:00:00 2001
+From 20f6660ab046ad57ec8755047895a14cbbab8caa Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 04:06:38 +0300
-Subject: [PATCH 12/15] fix(desktop): isolate project group deletion
+Subject: [PATCH 11/19] fix(desktop): isolate project group deletion
 
 ---
  .../project-group-delete-dialog.test.tsx      |  77 ++++-

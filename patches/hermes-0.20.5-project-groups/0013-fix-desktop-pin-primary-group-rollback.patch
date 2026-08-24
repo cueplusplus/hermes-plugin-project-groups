@@ -1,7 +1,7 @@
-From 033c221b6077779eefecdd4b85c79fc826793151 Mon Sep 17 00:00:00 2001
+From ee96444f28c9d2bf74531564e6a43bc8b4bd3129 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 04:24:22 +0300
-Subject: [PATCH 14/15] fix(desktop): pin primary group rollback
+Subject: [PATCH 13/19] fix(desktop): pin primary group rollback
 
 ---
  apps/desktop/src/store/projects.test.ts | 91 +++++++++++++++++++++++--

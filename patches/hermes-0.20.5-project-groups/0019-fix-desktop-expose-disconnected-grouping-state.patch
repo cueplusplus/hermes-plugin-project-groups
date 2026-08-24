@@ -1,0 +1,131 @@
+From 95bb5138d83614e5942da6242febc13a2d199d46 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 06:19:57 +0300
+Subject: [PATCH 19/19] fix(desktop): expose disconnected grouping state
+
+---
+ .../sidebar/projects-presentation.test.ts     | 74 +++++++++++++++++++
+ .../app/chat/sidebar/projects-presentation.ts |  8 +-
+ 2 files changed, 77 insertions(+), 5 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index bcc474e93..bd7e91285 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -228,6 +228,80 @@ describe('Projects grouping contribution', () => {
+     expect(primarySubscribeCalls).toBe(3)
+   })
+ 
++  it('disconnects after an idle retry exhausts the provider ladder and retries later', () => {
++    let fallbackRecovered = true
++    let fallbackListener: (() => void) | undefined
++    let fallbackSubscribeCalls = 0
++    const events: string[] = []
++    const primary = provider([{ id: 'primary', label: 'Primary', projectIds: ['a'] }])
++    const fallback = provider([{ id: 'fallback', label: 'Fallback', projectIds: ['b'] }])
++
++    primary.subscribe = () => {
++      events.push('subscribe:primary')
++      throw new Error('primary subscription failed')
++    }
++
++    fallback.subscribe = listener => {
++      fallbackSubscribeCalls += 1
++      events.push('subscribe:fallback')
++
++      if (!fallbackRecovered) {
++        throw new Error('fallback subscription failed')
++      }
++
++      fallbackListener = listener
++
++      return () => {
++        fallbackListener = undefined
++      }
++    }
++
++    register(primary, 0)
++    register(fallback, 10)
++
++    const initial = renderHook(() => useActiveProjectsGrouping())
++
++    expect(initial.result.current?.contribution).toBe(fallback)
++    initial.unmount()
++
++    fallbackRecovered = false
++    events.length = 0
++
++    const exhausted = renderHook(() => {
++      const grouping = useProjectsGrouping([project('a'), project('b')])
++      events.push(`render:${grouping?.snapshot.groups[0]?.id ?? 'empty'}`)
++
++      return grouping
++    })
++
++    expect(exhausted.result.current).toBeNull()
++    expect(events).toEqual(['render:fallback', 'subscribe:primary', 'subscribe:fallback', 'render:empty'])
++
++    exhausted.unmount()
++    fallbackRecovered = true
++    events.length = 0
++
++    const recovered = renderHook(() => {
++      const dialog = useActiveProjectsGrouping()
++      const sidebar = useProjectsGrouping([project('a'), project('b')])
++      events.push(`render:${dialog?.snapshot.groups[0]?.id ?? 'empty'}:${sidebar?.snapshot.groups[0]?.id ?? 'empty'}`)
++
++      return { dialog, sidebar }
++    })
++
++    expect(recovered.result.current.dialog?.contribution).toBe(fallback)
++    expect(recovered.result.current.sidebar?.contribution).toBe(fallback)
++    expect(recovered.result.current.sidebar?.snapshot).toBe(recovered.result.current.dialog?.snapshot)
++    expect(events).toEqual([
++      'render:empty:empty',
++      'subscribe:primary',
++      'subscribe:fallback',
++      'render:fallback:fallback'
++    ])
++    expect(fallbackSubscribeCalls).toBe(3)
++    expect(fallbackListener).toBeTypeOf('function')
++  })
++
+   it('settles on a stable empty state when every valid provider throws while subscribing', () => {
+     register({
+       getSnapshot: () => ({ groups: [{ id: 'broken', label: 'Broken', projectIds: ['a'] }] }),
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index 5cefeedac..c2ad051b4 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -260,7 +260,7 @@ function createStoreAdapter(
+     cached = provider ? { contribution: provider.contribution, snapshot: provider.snapshot } : null
+   }
+ 
+-  const subscribeToProvider = (initialCandidate = active, preserveActive = false) => {
++  const subscribeToProvider = (initialCandidate = active) => {
+     let candidate = initialCandidate
+ 
+     while (candidate) {
+@@ -285,9 +285,7 @@ function createStoreAdapter(
+       candidate = readValidProvider(entries, candidate.entryIndex + 1)
+     }
+ 
+-    if (!preserveActive) {
+-      select(null)
+-    }
++    select(null)
+   }
+ 
+   return {
+@@ -319,7 +317,7 @@ function createStoreAdapter(
+       if (!unsubscribeProvider) {
+         const retrying = retryPreferredProviders
+         retryPreferredProviders = false
+-        subscribeToProvider(retrying ? readValidProvider(entries) : active, retrying)
++        subscribeToProvider(retrying ? readValidProvider(entries) : active)
+       }
+ 
+       return () => {
+-- 
+2.50.1 (Apple Git-155)
+

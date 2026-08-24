@@ -1,7 +1,7 @@
-From 6eaa084eed6b4c2395010a9707fc0adc71c2d350 Mon Sep 17 00:00:00 2001
+From 7ab5fa6a4e77ae37fdd4239995b7e566d8d6cb6a Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 02:34:34 +0300
-Subject: [PATCH 08/15] fix(desktop): reconcile adopted project trees
+Subject: [PATCH 08/19] fix(desktop): reconcile adopted project trees
 
 ---
  apps/desktop/src/store/projects.test.ts | 150 +++++++++++++++++++++++-

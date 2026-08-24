@@ -1,54 +1,89 @@
 # Hermes Project Groups
 
-A shareable Hermes plugin that organizes flat Projects into collapsible groups in Desktop's native **PROJECTS** section without changing repositories or Project identity.
+**Turn a long, flat Hermes Project list into clear, collapsible groups—without changing Project identity, repositories, worktrees, or paths.**
 
-![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-orange)](#project-status)
+[![Hermes Agent plugin](https://img.shields.io/badge/Hermes-Agent-8A63D2)](https://hermes-agent.nousresearch.com/docs)
+
+Hermes Projects are intentionally flat. That is simple at small scale, but product portfolios and multi-repository organizations quickly become hard to scan. Project Groups adds an organizational presentation layer to the **native PROJECTS sidebar**, while Hermes continues to own Project activation, sessions, worktrees, menus, and storage.
+
+> [!IMPORTANT]
+> Native Project Groups UI is **not in an official Hermes release yet**. It currently requires the upstream draft [NousResearch/hermes-agent#93229](https://github.com/NousResearch/hermes-agent/pull/93229) or this repository's version-pinned compatibility patch. Do not install the plugin alone and expect native groups to appear.
+
+## Why Project Groups?
+
+- **Find work faster:** collapse product, client, team, or organization groups.
+- **Keep Hermes semantics:** a group is a label and membership relationship—not a working directory or parent Project.
+- **Stay native:** grouped rows reuse core Project behavior instead of duplicating it on a separate page.
+- **Remain profile-safe:** each Hermes backend/profile owns its own assignments; local and remote Project IDs are never silently merged.
+- **Recover safely:** backend writes are validated, lock-protected, bounded, and atomic.
 
 ## Features
 
-- Contributes one stable `projects.grouping` provider to the existing native Projects list.
-- Creates groups through Hermes's native folder-plus dialog.
-- Assigns and unassigns Projects through each native Project menu.
-- Exposes exact-membership group deletion to compatible native Desktop builds; former members become Ungrouped without deleting Projects.
-- Persists collapse state, group order, and membership per active backend/profile.
-- Keeps native Project rows, activation, sessions, worktrees, menus, and appearance core-owned.
-- Leaves the canonical Hermes Project database, repositories, and filesystem paths untouched.
-- Preserves CUE++, RGC-LABS, and RGC Legacy defaults when migrating an existing local cache.
+- Native collapsible groups in the existing **PROJECTS** section.
+- Native create-group dialog and folder-plus action.
+- **Move to group** / **Ungrouped** actions in each Project menu.
+- Guarded exact-membership group deletion; deleting a group never deletes Projects.
+- Stable group IDs, explicit order, collapse state, and membership.
+- Profile-scoped backend persistence with a read-only Desktop cache for offline display and migration.
+- Agent tools: `project_groups_list` and `project_group_get`.
+- Bundled skill and bounded prompt context explaining group semantics.
+- No MCP server, repository moves, path changes, or duplicate Project Groups page.
 
-## Requirements
+## Safe installation
 
-- A recent Hermes Desktop build with the Desktop Plugin SDK.
-- Existing Hermes Projects to organize.
+Installation is deliberately **agent-led**, because native support may require a source patch and a Desktop build. A Hermes Agent can inspect its live version, checkout, profile, sessions, and official documentation before deciding whether installation is safe.
 
-## Install
+### Give Hermes one canonical instruction file
 
-Requires a Hermes build with unified Desktop plugins, backend plugin APIs, and the native `projects.grouping` contribution contract. There is intentionally no standalone route, navigation item, or Project Groups page.
+Open a Hermes Agent session with access to this repository and your Hermes environment, then say:
 
-### One-click Desktop install
+> Read and follow `AGENT_INSTALL.md` in this repository. Perform the dry preflight and report the compatibility classification and backup plan before making changes. Do not publish, push, auto-resolve conflicts, or restart active shared sessions.
 
-[Install Project Groups in Hermes](hermes://plugin/install?repo=cueplusplus/hermes-plugin-project-groups)
+**Do not manually copy patch commands from the patch README.** [`AGENT_INSTALL.md`](AGENT_INSTALL.md) is the single installation procedure and includes discovery, complete environment backups, compatibility classification, immutable plugin installation, verification, rollback, and readback. The patch script's own source/bundle backup is only one supplemental layer; it does not back up config, plugins, Project Groups state, or the Projects database.
 
-Hermes opens a confirmation dialog, detects the agent and Desktop halves, and lets the user choose what to install.
+### Confirmed Hermes GitHub installer syntax
 
-### Official CLI installer
+The current Hermes CLI accepts both Git URLs and `owner/repo` shorthand, and requires a 40-character immutable commit with `--ref`:
 
-```bash
-hermes plugins install cueplusplus/hermes-plugin-project-groups
-hermes plugins enable project-groups
+```text
+hermes plugins install cueplusplus/hermes-plugin-project-groups \
+  --ref 0c58068035202f5defcf25270bee37ffd63d9a9b \
+  --no-enable
 ```
 
-The repository follows Hermes's unified plugin layout, so the official installer places the backend under `~/.hermes/plugins/project-groups/` and Desktop loads `desktop/plugin.js` from the same package. Restart the dashboard/gateway only when enabling the backend persistence half.
+This syntax was confirmed against `hermes plugins install --help` and the live Hermes plugin documentation. It is shown for transparency; the installation agent must run it only after the preflight and backups in `AGENT_INSTALL.md`.
 
-### Development checkout
+## How it works
 
-A symlink keeps Desktop hot reload attached to a working tree:
+The unified plugin has three coordinated parts:
 
-```bash
-mkdir -p ~/.hermes/desktop-plugins/project-groups
-ln -sf "$PWD/plugin.js" ~/.hermes/desktop-plugins/project-groups/plugin.js
+1. **Desktop provider** — contributes one stable `projects.grouping` provider to Hermes's native list.
+2. **Profile backend** — stores authoritative state at `$HERMES_HOME/project-groups/state.json` and exposes guarded mutations.
+3. **Agent integration** — registers read tools and a skill so agents understand that groups organize Projects but do not change their filesystem scope.
+
+A local Desktop connected to a remote Hermes host needs the compatible Desktop UI locally and the plugin backend enabled on the remote profile that owns the Projects.
+
+## Storage and safety
+
+Authoritative state:
+
+```text
+$HERMES_HOME/project-groups/state.json
 ```
 
-Hermes watches this directory. If the page does not appear within a few seconds, run **Reload desktop plugins** from the command palette.
+Writes are atomic and validated. Delete uses an exact member-set compare-and-swap plus a bounded durable operation ledger, so retries are idempotent. The Desktop cache (`hermes.plugin.project-groups.state.v1`) is an offline display and migration source, never an offline write authority.
+
+## Compatibility
+
+| Component | Supported pin |
+|---|---|
+| Plugin | `0c58068035202f5defcf25270bee37ffd63d9a9b` (`v0.4.0`) |
+| Bundled patch base | `981101239a064c020a9d18fc3b1060ae306934ed` |
+| Patch bundle | `patches/hermes-0.20.5-project-groups/` (19 ordered patches) |
+| Upstream path | Draft PR [#93229](https://github.com/NousResearch/hermes-agent/pull/93229) |
+
+A different Hermes revision is never implicitly compatible. The agent must classify it as exact-supported, safely adaptable, or incompatible. “Safely adaptable” means creating a **new versioned bundle**, proving it in a clean clone, and only then considering installation; it never means applying the old series with conflict resolution.
 
 ## Development
 
@@ -57,37 +92,29 @@ npm test
 npm run check
 ```
 
-The Desktop entrypoint is plain, dependency-free ESM with no build step. `plugin.js` and `desktop/plugin.js` are kept byte-identical. Tests cover the reusable grouping rules, authoritative backend mutations, exact-membership deletion and retry idempotency, provider publication semantics, offline behavior, migration, and process reloads.
-
-## Agent and LLM awareness
-
-The unified package registers three native Hermes surfaces when its agent half is enabled:
-
-- `project_groups_list` — current groups, member Projects/paths, and ungrouped Projects;
-- `project_group_get` — one group by id or name;
-- `project-groups:project-groups` — a bundled skill explaining the model and safe interaction rules.
-
-It also contributes a short bounded system-prompt section so new sessions know that groups are organizational parents—not working directories—and that local/remote Project IDs remain independent.
-
-No MCP server is required. MCP would create a second protocol/process for data already owned by the current Hermes profile. Native plugin tools are smaller, profile-aware, appear in the normal Hermes tool registry, and use the same backend state as the Desktop plugin.
-
-## Storage and scope
-
-The preferred persistence path is the plugin's profile-scoped backend:
-
-```text
-$HERMES_HOME/project-groups/state.json
-```
-
-Writes are lock-protected, validated, bounded, and atomic. Create, assign/unassign, collapse, and delete mutations succeed on the backend before Desktop updates its cache or publishes a new snapshot. Delete uses an exact member-set compare-and-swap and records a bounded durable operation ledger in the same atomic state replacement, making response retries idempotent. The Desktop copy under `hermes.plugin.project-groups.state.v1` is a read-only offline fallback and one-time migration source; it is never an offline write authority. Project IDs and filesystem paths are backend/profile-specific, so local and remote Projects remain distinct even when they share a group label.
+`plugin.js` and `desktop/plugin.js` remain byte-identical plain ESM. Tests cover grouping rules, backend mutations, deletion CAS/idempotency, provider publication, migration, reloads, and patch installer safety with disposable Git repositories.
 
 ## Current limitations
 
-- Desktop builds without `projects.grouping` cannot render the native grouping provider; no duplicate page fallback is registered.
-- Cross-gateway organization identity is not merged automatically; each backend/profile owns its Project assignments.
-- Nested groups and grouped drag-reordering are outside the v1 native contract.
-- When the backend is unavailable, the last cache remains visible but create, move, collapse, and delete controls are unavailable.
+- Native UI requires draft PR #93229 or a proven compatibility patch until the seam ships upstream.
+- Groups are profile/backend-specific; same-name groups across gateways are not one entity.
+- Nested groups and grouped drag-reordering are outside the v1 contract.
+- Offline state is read-only; mutations require the backend.
+
+## Project status
+
+Alpha. The repository is public, but native compatibility remains version-pinned and should be installed only through the reviewed agent-led workflow.
 
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/cueplusplus-wordmark.svg">
+    <img src="assets/cueplusplus-wordmark-dark.svg" alt="CUE++" width="116">
+  </picture><br>
+  <sub>Built by CUE++</sub>
+</p>

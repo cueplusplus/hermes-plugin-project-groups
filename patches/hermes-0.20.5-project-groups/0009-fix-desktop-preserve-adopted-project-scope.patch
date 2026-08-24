@@ -1,7 +1,7 @@
-From 8c65ad56543733e85bf84621c127d242a5cc4066 Mon Sep 17 00:00:00 2001
+From bbcf6e0266ebe513f427e6cbe5c14284dd5b3946 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 02:42:08 +0300
-Subject: [PATCH 09/15] fix(desktop): preserve adopted project scope
+Subject: [PATCH 09/19] fix(desktop): preserve adopted project scope
 
 ---
  apps/desktop/src/store/projects.test.ts | 67 +++++++++++++++++++++++++

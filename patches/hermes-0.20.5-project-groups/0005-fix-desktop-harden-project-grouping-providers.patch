@@ -1,7 +1,7 @@
-From ffe42c5f25be443df1f581e64c77b3793d74417c Mon Sep 17 00:00:00 2001
+From a88243816ea2a111996283e96c97317a8fd3ea58 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 01:59:43 +0300
-Subject: [PATCH 05/15] fix(desktop): harden project grouping providers
+Subject: [PATCH 05/19] fix(desktop): harden project grouping providers
 
 ---
  .../sidebar/projects-presentation.test.ts     | 66 ++++++++++++++-

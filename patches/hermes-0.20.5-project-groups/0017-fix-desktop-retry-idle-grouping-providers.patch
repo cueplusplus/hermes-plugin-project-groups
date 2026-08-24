@@ -1,0 +1,81 @@
+From b5bacca1819e0e10c1c8ba2bdd4b356ccf2b2969 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 06:02:03 +0300
+Subject: [PATCH 17/19] fix(desktop): retry idle grouping providers
+
+---
+ .../sidebar/projects-presentation.test.ts     | 40 +++++++++++++++++++
+ .../app/chat/sidebar/projects-presentation.ts |  5 ++-
+ 2 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index f35bd1eb1..65afd0356 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -167,6 +167,46 @@ describe('Projects grouping contribution', () => {
+     expect(result.current.sidebar?.snapshot).toBe(result.current.dialog?.snapshot)
+   })
+ 
++  it('retries the highest-priority provider after every shared consumer unmounts', () => {
++    let primaryRecovered = false
++    let primarySubscribeCalls = 0
++    const primary = provider([{ id: 'primary', label: 'Primary', projectIds: ['a'] }])
++
++    primary.subscribe = () => {
++      primarySubscribeCalls += 1
++
++      if (!primaryRecovered) {
++        throw new Error('transient subscription failure')
++      }
++
++      return () => undefined
++    }
++
++    const fallback = provider([{ id: 'fallback', label: 'Fallback', projectIds: ['b'] }])
++    register(primary, 0)
++    register(fallback, 10)
++
++    const first = renderHook(() => useActiveProjectsGrouping())
++    const second = renderHook(() => useProjectsGrouping([project('a'), project('b')]))
++
++    expect(first.result.current?.contribution).toBe(fallback)
++    expect(second.result.current?.contribution).toBe(fallback)
++
++    first.unmount()
++    primaryRecovered = true
++    second.rerender()
++
++    expect(second.result.current?.contribution).toBe(fallback)
++
++    second.unmount()
++
++    const laterConsumer = renderHook(() => useActiveProjectsGrouping())
++
++    expect(laterConsumer.result.current?.contribution).toBe(primary)
++    expect(laterConsumer.result.current?.snapshot.groups[0].id).toBe('primary')
++    expect(primarySubscribeCalls).toBe(2)
++  })
++
+   it('settles on a stable empty state when every valid provider throws while subscribing', () => {
+     register({
+       getSnapshot: () => ({ groups: [{ id: 'broken', label: 'Broken', projectIds: ['a'] }] }),
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index f77ae7b9a..1ab815115 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -312,9 +312,10 @@ function createStoreAdapter(
+       return () => {
+         listeners.delete(listener)
+ 
+-        if (listeners.size === 0 && unsubscribeProvider) {
+-          unsubscribeProvider()
++        if (listeners.size === 0) {
++          unsubscribeProvider?.()
+           unsubscribeProvider = null
++          select(readValidProvider(entries))
+         }
+       }
+     }
+-- 
+2.50.1 (Apple Git-155)
+

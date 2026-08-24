@@ -1,0 +1,194 @@
+From 6d5ca437545266f7689b36f342829a1f73294035 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 05:55:20 +0300
+Subject: [PATCH 16/19] fix(desktop): centralize grouping provider failover
+
+---
+ .../sidebar/projects-presentation.test.ts     | 51 +++++++++++++
+ .../app/chat/sidebar/projects-presentation.ts | 75 ++++++++++++++-----
+ 2 files changed, 109 insertions(+), 17 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index c24e3bb00..f35bd1eb1 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -116,6 +116,57 @@ describe('Projects grouping contribution', () => {
+     ])
+   })
+ 
++  it('shares call-dependent subscription failover across concurrent consumers', () => {
++    let subscribeCalls = 0
++    const primary = provider([{ id: 'primary', label: 'Primary', projectIds: ['a'] }])
++    primary.assignProject = vi.fn()
++
++    primary.subscribe = () => {
++      subscribeCalls += 1
++
++      if (subscribeCalls === 1) {
++        throw new Error('first subscription failed')
++      }
++
++      return () => undefined
++    }
++
++    const fallback = provider([{ id: 'fallback', label: 'Fallback', projectIds: ['b'] }])
++    fallback.assignProject = vi.fn()
++    register(primary, 0)
++    register(fallback, 10)
++
++    const { result } = renderHook(() => ({
++      dialog: useActiveProjectsGrouping(),
++      menu: useActiveProjectsGrouping(),
++      sessions: useProjectsGrouping([project('a'), project('b')]),
++      sidebar: useProjectsGrouping([project('a'), project('b')])
++    }))
++
++    expect(result.current.dialog?.contribution).toBe(fallback)
++    expect(result.current.menu?.contribution).toBe(fallback)
++    expect(result.current.sessions?.contribution).toBe(fallback)
++    expect(result.current.sidebar?.contribution).toBe(fallback)
++    expect(result.current.dialog?.snapshot.groups[0].id).toBe('fallback')
++    expect(result.current.menu?.snapshot).toBe(result.current.dialog?.snapshot)
++    expect(result.current.sessions?.snapshot).toBe(result.current.dialog?.snapshot)
++    expect(result.current.sidebar?.snapshot).toBe(result.current.dialog?.snapshot)
++    expect(result.current.sessions?.groups[0].id).toBe('fallback')
++    expect(result.current.sidebar?.groups[0].id).toBe('fallback')
++    expect(subscribeCalls).toBe(1)
++
++    const recovered = provider([{ id: 'recovered', label: 'Recovered', projectIds: ['a'] }])
++    act(() => register(recovered, -10))
++
++    expect(result.current.dialog?.contribution).toBe(recovered)
++    expect(result.current.menu?.contribution).toBe(recovered)
++    expect(result.current.sessions?.contribution).toBe(recovered)
++    expect(result.current.sidebar?.contribution).toBe(recovered)
++    expect(result.current.menu?.snapshot).toBe(result.current.dialog?.snapshot)
++    expect(result.current.sessions?.snapshot).toBe(result.current.dialog?.snapshot)
++    expect(result.current.sidebar?.snapshot).toBe(result.current.dialog?.snapshot)
++  })
++
+   it('settles on a stable empty state when every valid provider throws while subscribing', () => {
+     register({
+       getSnapshot: () => ({ groups: [{ id: 'broken', label: 'Broken', projectIds: ['a'] }] }),
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index fb9a82b0f..f77ae7b9a 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -1,4 +1,4 @@
+-import { useMemo, useSyncExternalStore } from 'react'
++import { useSyncExternalStore } from 'react'
+ 
+ import { useContributions } from '@/contrib/react/use-contributions'
+ import { registry } from '@/contrib/registry'
+@@ -236,20 +236,49 @@ interface ProjectsGroupingStoreSnapshot {
+   readonly snapshot: ProjectsGroupingSnapshot
+ }
+ 
++interface ProjectsGroupingStore {
++  getSnapshot(): ProjectsGroupingStoreSnapshot | null
++  subscribe(listener: () => void): () => void
++}
++
+ function createStoreAdapter(
+   entries: readonly Contribution[],
+   initialProvider: ResolvedProjectsGroupingProvider | null
+-) {
++): ProjectsGroupingStore {
+   let active = initialProvider
++
+   let cached: ProjectsGroupingStoreSnapshot | null = active
+     ? { contribution: active.contribution, snapshot: active.snapshot }
+     : null
+ 
++  let unsubscribeProvider: (() => void) | null = null
++  const listeners = new Set<() => void>()
++
+   const select = (provider: ResolvedProjectsGroupingProvider | null) => {
+     active = provider
+     cached = provider ? { contribution: provider.contribution, snapshot: provider.snapshot } : null
+   }
+ 
++  const subscribeToProvider = () => {
++    while (active) {
++      try {
++        const unsubscribe = active.contribution.subscribe(() => listeners.forEach(listener => listener()))
++
++        if (typeof unsubscribe === 'function') {
++          unsubscribeProvider = unsubscribe
++
++          return
++        }
++      } catch {
++        // A provider can pass snapshot validation yet still fail to establish
++        // its subscription. Continue down the same deterministic precedence
++        // ladder instead of letting React's external-store effect crash.
++      }
++
++      select(readValidProvider(entries, active.entryIndex + 1))
++    }
++  }
++
+   return {
+     getSnapshot: () => {
+       if (!active || !cached) {
+@@ -274,30 +303,42 @@ function createStoreAdapter(
+       return cached
+     },
+     subscribe: (listener: () => void) => {
+-      while (active) {
+-        try {
+-          const unsubscribe = active.contribution.subscribe(listener)
+-
+-          if (typeof unsubscribe === 'function') {
+-            return unsubscribe
+-          }
+-        } catch {
+-          // A provider can pass snapshot validation yet still fail to establish
+-          // its subscription. Continue down the same deterministic precedence
+-          // ladder instead of letting React's external-store effect crash.
+-        }
++      listeners.add(listener)
+ 
+-        select(readValidProvider(entries, active.entryIndex + 1))
++      if (!unsubscribeProvider) {
++        subscribeToProvider()
+       }
+ 
+-      return () => undefined
++      return () => {
++        listeners.delete(listener)
++
++        if (listeners.size === 0 && unsubscribeProvider) {
++          unsubscribeProvider()
++          unsubscribeProvider = null
++        }
++      }
+     }
+   }
+ }
+ 
++const groupingStores = new WeakMap<readonly Contribution[], ProjectsGroupingStore>()
++
++function getProjectsGroupingStore(entries: readonly Contribution[]): ProjectsGroupingStore {
++  const existing = groupingStores.get(entries)
++
++  if (existing) {
++    return existing
++  }
++
++  const store = createStoreAdapter(entries, readValidProvider(entries))
++  groupingStores.set(entries, store)
++
++  return store
++}
++
+ function useProjectsGroupingStore() {
+   const entries = useContributions(PROJECTS_GROUPING_AREA)
+-  const store = useMemo(() => createStoreAdapter(entries, readValidProvider(entries)), [entries])
++  const store = getProjectsGroupingStore(entries)
+ 
+   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+ }
+-- 
+2.50.1 (Apple Git-155)
+

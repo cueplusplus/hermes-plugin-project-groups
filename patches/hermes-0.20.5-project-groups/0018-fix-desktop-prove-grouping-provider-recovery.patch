@@ -1,0 +1,146 @@
+From c4e6df85b15d398b9b3e82c20f5d9aab2a9477b5 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 06:09:12 +0300
+Subject: [PATCH 18/19] fix(desktop): prove grouping provider recovery
+
+---
+ .../sidebar/projects-presentation.test.ts     | 33 +++++++++++++++----
+ .../app/chat/sidebar/projects-presentation.ts | 25 ++++++++++----
+ 2 files changed, 46 insertions(+), 12 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+index 65afd0356..bcc474e93 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.test.ts
+@@ -167,13 +167,15 @@ describe('Projects grouping contribution', () => {
+     expect(result.current.sidebar?.snapshot).toBe(result.current.dialog?.snapshot)
+   })
+ 
+-  it('retries the highest-priority provider after every shared consumer unmounts', () => {
++  it('keeps the proven fallback rendered until an idle retry successfully subscribes to the primary', () => {
+     let primaryRecovered = false
+     let primarySubscribeCalls = 0
++    const events: string[] = []
+     const primary = provider([{ id: 'primary', label: 'Primary', projectIds: ['a'] }])
+ 
+     primary.subscribe = () => {
+       primarySubscribeCalls += 1
++      events.push('subscribe:primary')
+ 
+       if (!primaryRecovered) {
+         throw new Error('transient subscription failure')
+@@ -193,18 +195,37 @@ describe('Projects grouping contribution', () => {
+     expect(second.result.current?.contribution).toBe(fallback)
+ 
+     first.unmount()
+-    primaryRecovered = true
+     second.rerender()
+ 
+     expect(second.result.current?.contribution).toBe(fallback)
+ 
+     second.unmount()
++    events.length = 0
++
++    const brokenRemount = renderHook(() => {
++      const active = useActiveProjectsGrouping()
++      events.push(`render:${active?.snapshot.groups[0]?.id ?? 'empty'}`)
++
++      return active
++    })
++
++    expect(brokenRemount.result.current?.contribution).toBe(fallback)
++    expect(events.filter(event => event.startsWith('render:'))).toEqual(['render:fallback'])
+ 
+-    const laterConsumer = renderHook(() => useActiveProjectsGrouping())
++    brokenRemount.unmount()
++    primaryRecovered = true
++    events.length = 0
++
++    const recoveredRemount = renderHook(() => {
++      const active = useActiveProjectsGrouping()
++      events.push(`render:${active?.snapshot.groups[0]?.id ?? 'empty'}`)
++
++      return active
++    })
+ 
+-    expect(laterConsumer.result.current?.contribution).toBe(primary)
+-    expect(laterConsumer.result.current?.snapshot.groups[0].id).toBe('primary')
+-    expect(primarySubscribeCalls).toBe(2)
++    expect(recoveredRemount.result.current?.contribution).toBe(primary)
++    expect(events).toEqual(['render:fallback', 'subscribe:primary', 'render:primary'])
++    expect(primarySubscribeCalls).toBe(3)
+   })
+ 
+   it('settles on a stable empty state when every valid provider throws while subscribing', () => {
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index 1ab815115..5cefeedac 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -252,6 +252,7 @@ function createStoreAdapter(
+     : null
+ 
+   let unsubscribeProvider: (() => void) | null = null
++  let retryPreferredProviders = false
+   const listeners = new Set<() => void>()
+ 
+   const select = (provider: ResolvedProjectsGroupingProvider | null) => {
+@@ -259,14 +260,20 @@ function createStoreAdapter(
+     cached = provider ? { contribution: provider.contribution, snapshot: provider.snapshot } : null
+   }
+ 
+-  const subscribeToProvider = () => {
+-    while (active) {
++  const subscribeToProvider = (initialCandidate = active, preserveActive = false) => {
++    let candidate = initialCandidate
++
++    while (candidate) {
+       try {
+-        const unsubscribe = active.contribution.subscribe(() => listeners.forEach(listener => listener()))
++        const unsubscribe = candidate.contribution.subscribe(() => listeners.forEach(listener => listener()))
+ 
+         if (typeof unsubscribe === 'function') {
+           unsubscribeProvider = unsubscribe
+ 
++          if (candidate.contribution !== active?.contribution) {
++            select(candidate)
++          }
++
+           return
+         }
+       } catch {
+@@ -275,7 +282,11 @@ function createStoreAdapter(
+         // ladder instead of letting React's external-store effect crash.
+       }
+ 
+-      select(readValidProvider(entries, active.entryIndex + 1))
++      candidate = readValidProvider(entries, candidate.entryIndex + 1)
++    }
++
++    if (!preserveActive) {
++      select(null)
+     }
+   }
+ 
+@@ -306,7 +317,9 @@ function createStoreAdapter(
+       listeners.add(listener)
+ 
+       if (!unsubscribeProvider) {
+-        subscribeToProvider()
++        const retrying = retryPreferredProviders
++        retryPreferredProviders = false
++        subscribeToProvider(retrying ? readValidProvider(entries) : active, retrying)
+       }
+ 
+       return () => {
+@@ -315,7 +328,7 @@ function createStoreAdapter(
+         if (listeners.size === 0) {
+           unsubscribeProvider?.()
+           unsubscribeProvider = null
+-          select(readValidProvider(entries))
++          retryPreferredProviders = true
+         }
+       }
+     }
+-- 
+2.50.1 (Apple Git-155)
+

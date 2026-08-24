@@ -1,7 +1,7 @@
-From a7bcc36d47e8af6672b71871486541b403a54eee Mon Sep 17 00:00:00 2001
+From c9fdf97a85fc56eef09d35081efa895b2a935c36 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 00:08:39 +0300
-Subject: [PATCH 02/15] fix(desktop): preserve grouped project reordering
+Subject: [PATCH 02/19] fix(desktop): preserve grouped project reordering
 
 ---
  .../src/app/chat/sidebar/sessions-section.tsx | 91 +++++++++++--------

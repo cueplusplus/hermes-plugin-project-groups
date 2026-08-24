@@ -1,7 +1,7 @@
-From 6bc490d3b30e2fe4fbe4bf7986c53e82280e00eb Mon Sep 17 00:00:00 2001
+From 0213a661e7b842dc447df5511e95387482776cea Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 04:29:13 +0300
-Subject: [PATCH 15/15] fix(desktop): distinguish project gateway routes
+Subject: [PATCH 14/19] fix(desktop): distinguish project gateway routes
 
 ---
  apps/desktop/src/store/projects.test.ts | 80 +++++++++++++++++++++++++
