@@ -1,7 +1,7 @@
-From 558adb966ccf370b31930e8a83bdac4a1e12b740 Mon Sep 17 00:00:00 2001
+From 30d138af5fb821fdb8900204085f8a2721166025 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 02:23:49 +0300
-Subject: [PATCH 7/9] fix(desktop): reconcile grouped project materialization
+Subject: [PATCH 07/15] fix(desktop): reconcile grouped project materialization
 
 ---
  .../sidebar/projects-presentation.test.ts     |  53 +++++

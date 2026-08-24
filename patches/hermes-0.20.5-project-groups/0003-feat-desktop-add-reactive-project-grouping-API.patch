@@ -1,7 +1,7 @@
-From 810a4cb801e79c64c2f15f2b6b057b94cf199e4d Mon Sep 17 00:00:00 2001
+From b480b0a816e674dc31240baf12ad32d87d856539 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 01:35:02 +0300
-Subject: [PATCH 3/9] feat(desktop): add reactive project grouping API
+Subject: [PATCH 03/15] feat(desktop): add reactive project grouping API
 
 ---
  .../sidebar/projects-presentation.test.ts     |  81 ++++++----

@@ -1,7 +1,7 @@
-From 31edbf4389acaa5aaf76db5890bfa7584bc3b31b Mon Sep 17 00:00:00 2001
+From 20f2211deafa92d3a5cdc822aec95c0dd5eba87a Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 02:10:37 +0300
-Subject: [PATCH 6/9] fix(desktop): preserve grouping across project adoption
+Subject: [PATCH 06/15] fix(desktop): preserve grouping across project adoption
 
 ---
  .../sidebar/projects-presentation.test.ts     | 18 ++++++

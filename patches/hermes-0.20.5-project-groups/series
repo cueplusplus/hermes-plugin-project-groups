@@ -7,3 +7,8 @@
 0007-fix-desktop-reconcile-grouped-project-materializatio.patch
 0008-fix-desktop-reconcile-adopted-project-trees.patch
 0009-fix-desktop-preserve-adopted-project-scope.patch
+0011-feat-desktop-add-guarded-project-group-deletion.patch
+0012-fix-desktop-isolate-project-group-deletion.patch
+0013-fix-desktop-reconnect-pinned-group-deletion.patch
+0014-fix-desktop-pin-primary-group-rollback.patch
+0015-fix-desktop-distinguish-project-gateway-routes.patch

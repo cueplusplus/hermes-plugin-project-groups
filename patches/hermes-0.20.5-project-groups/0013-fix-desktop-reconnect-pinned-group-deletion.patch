@@ -1,0 +1,429 @@
+From a659bc7c6019b006a73419784c1932e2df06d24a Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 04:17:30 +0300
+Subject: [PATCH 13/15] fix(desktop): reconnect pinned group deletion
+
+---
+ .../project-group-delete-dialog.test.tsx      |  34 ++++++
+ .../sidebar/project-group-delete-dialog.tsx   |  24 ++--
+ .../chat/sidebar/project-group-delete.test.ts |   6 +-
+ .../app/chat/sidebar/project-group-delete.ts  |  20 ++--
+ apps/desktop/src/store/projects.test.ts       | 109 ++++++++++++++++++
+ apps/desktop/src/store/projects.ts            |  38 ++++--
+ 6 files changed, 201 insertions(+), 30 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+index 1b11e1b2d..1ebd1767b 100644
+--- a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+@@ -1,6 +1,8 @@
+ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ 
++import { withActiveProjectsContext } from '@/store/projects'
++
+ import { ProjectGroupDeleteDialog } from './project-group-delete-dialog'
+ import type { ProjectsGroupingContribution } from './projects-presentation'
+ 
+@@ -68,12 +70,19 @@ function provider(group: { id: string; label: string; projectIds: string[] }, de
+ afterEach(() => {
+   cleanup()
+   vi.clearAllMocks()
++  vi.mocked(withActiveProjectsContext).mockImplementation(operation =>
++    operation({
++      reconcile: vi.fn().mockResolvedValue(undefined),
++      renameMany: vi.fn().mockResolvedValue([])
++    })
++  )
+ })
+ 
+ describe('ProjectGroupDeleteDialog', () => {
+   it('uses a compact confirmation for an empty group and sends the provider CAS request', async () => {
+     const group = { id: 'empty', label: 'Empty', projectIds: [] }
+     const { contribution, deleteGroup } = provider(group, vi.fn().mockResolvedValue(undefined))
++    vi.mocked(withActiveProjectsContext).mockRejectedValue(new Error('Projects unavailable in All Profiles'))
+ 
+     render(
+       <ProjectGroupDeleteDialog
+@@ -96,6 +105,31 @@ describe('ProjectGroupDeleteDialog', () => {
+       groupId: 'empty',
+       operationId: expect.any(String)
+     })
++    expect(withActiveProjectsContext).not.toHaveBeenCalled()
++  })
++
++  it('deletes a nonempty unchecked group in All Profiles without capturing Projects context', async () => {
++    const group = { id: 'work', label: 'Work', projectIds: ['p_alpha'] }
++    const { contribution, deleteGroup } = provider(group, vi.fn().mockResolvedValue(undefined))
++    vi.mocked(withActiveProjectsContext).mockRejectedValue(new Error('Projects unavailable in All Profiles'))
++    const onOpenChange = vi.fn()
++
++    render(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={group}
++        onOpenChange={onOpenChange}
++        open
++        projects={projects}
++      />
++    )
++
++    expect(screen.getByRole('checkbox').getAttribute('data-state')).toBe('unchecked')
++    fireEvent.click(screen.getByRole('button', { name: 'Delete group' }))
++
++    await waitFor(() => expect(deleteGroup).toHaveBeenCalledOnce())
++    expect(withActiveProjectsContext).not.toHaveBeenCalled()
++    expect(onOpenChange).toHaveBeenCalledWith(false)
+   })
+ 
+   it('starts unchecked with no preview, then renders the exact tree-to-flat preview', async () => {
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+index 284d7c7ac..05441082e 100644
+--- a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+@@ -130,16 +130,22 @@ export function ProjectGroupDeleteDialog({
+   }
+ 
+   const performDelete = async (prepend: boolean) => {
++    const deletion = {
++      contribution,
++      group: review.group,
++      operationId: review.operationId,
++      prependGroupName: prepend,
++      projects
++    }
++
++    if (!prepend) {
++      await deleteProjectGroup(deletion)
++
++      return
++    }
++
+     await withActiveProjectsContext(({ reconcile, renameMany }) =>
+-      deleteProjectGroup({
+-        contribution,
+-        group: review.group,
+-        operationId: review.operationId,
+-        prependGroupName: prepend,
+-        projects,
+-        reconcile,
+-        renameMany
+-      })
++      deleteProjectGroup({ ...deletion, reconcile, renameMany })
+     )
+   }
+ 
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts b/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts
+index 208b67871..48b64e6c5 100644
+--- a/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts
+@@ -39,19 +39,15 @@ describe('Project group deletion saga', () => {
+ 
+   it('deletes an unchecked group with only the provider CAS request', async () => {
+     const provider = contribution()
+-    const renameMany = vi.fn()
+ 
+     await deleteProjectGroup({
+       contribution: provider,
+       group,
+       operationId: 'operation-1',
+       prependGroupName: false,
+-      projects,
+-      reconcile: vi.fn(),
+-      renameMany
++      projects
+     })
+ 
+-    expect(renameMany).not.toHaveBeenCalled()
+     expect(provider.deleteGroup).toHaveBeenCalledWith({
+       expectedProjectIds: ['p_alpha', 'p_prefixed'],
+       groupId: 'group-1',
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete.ts b/apps/desktop/src/app/chat/sidebar/project-group-delete.ts
+index fa772e16e..250a80bc8 100644
+--- a/apps/desktop/src/app/chat/sidebar/project-group-delete.ts
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete.ts
+@@ -126,8 +126,8 @@ export interface DeleteProjectGroupOptions {
+   readonly operationId: string
+   readonly prependGroupName: boolean
+   readonly projects: readonly ProjectGroupDeleteProject[]
+-  readonly renameMany: (renames: readonly ProjectNameCAS[]) => Promise<unknown>
+-  readonly reconcile: () => Promise<unknown>
++  readonly renameMany?: (renames: readonly ProjectNameCAS[]) => Promise<unknown>
++  readonly reconcile?: () => Promise<unknown>
+ }
+ 
+ /**
+@@ -167,17 +167,21 @@ export async function deleteProjectGroup({
+   const expectedProjectIds = normalizedMemberIds(group.projectIds)
+   const renames = prependGroupName ? buildProjectGroupRenamePlan(group, projects) : []
+ 
+-  if (renames.length) {
+-    await renameMany(renames)
++  if (!renames.length) {
++    await contribution.deleteGroup({ expectedProjectIds, groupId: group.id, operationId })
++
++    return
++  }
++
++  if (!renameMany || !reconcile) {
++    throw new ProjectGroupDeleteValidationError('unsupported', 'Project rename operations are unavailable')
+   }
+ 
++  await renameMany(renames)
++
+   try {
+     await contribution.deleteGroup({ expectedProjectIds, groupId: group.id, operationId })
+   } catch (providerError) {
+-    if (!renames.length) {
+-      throw providerError
+-    }
+-
+     const rollback = renames.map(rename => ({
+       expectedName: rename.newName,
+       id: rename.id,
+diff --git a/apps/desktop/src/store/projects.test.ts b/apps/desktop/src/store/projects.test.ts
+index a604a53c1..0e40d8b14 100644
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -65,6 +65,8 @@ vi.mock('@/lib/desktop-fs', () => ({
+ vi.mock('@/store/gateway', () => ({
+   $gateway: atom(null),
+   activeGateway: vi.fn(),
++  activeGatewayConnectionId: vi.fn(),
++  requestGatewayForAgent: vi.fn(),
+   ensureActiveGatewayOpen: vi.fn()
+ }))
+ 
+@@ -88,7 +90,9 @@ const selectDesktopPaths = vi.mocked(fs.selectDesktopPaths)
+ 
+ const gw = await import('@/store/gateway')
+ const activeGateway = vi.mocked(gw.activeGateway)
++const activeGatewayConnectionId = vi.mocked(gw.activeGatewayConnectionId)
+ const gatewayAtom = gw.$gateway
++const requestGatewayForAgent = vi.mocked(gw.requestGatewayForAgent)
+ 
+ const git = await import('@/lib/desktop-git')
+ const desktopGit = vi.mocked(git.desktopGit)
+@@ -147,6 +151,16 @@ describe('project scope', () => {
+ describe('projects RPC profile forwarding', () => {
+   beforeEach(() => {
+     vi.clearAllMocks()
++    activeGatewayConnectionId.mockReturnValue(null)
++    requestGatewayForAgent.mockImplementation(async (_connectionId, _profile, method, params) => {
++      const gateway = activeGateway()
++
++      if (!gateway) {
++        throw new Error('Hermes gateway is not connected')
++      }
++
++      return gateway.request(method, params) as never
++    })
+     $activeGatewayProfile.set('default')
+     $activeProjectId.set(null)
+     $projectTree.set([])
+@@ -205,6 +219,16 @@ describe('transactional Project renaming', () => {
+ 
+   beforeEach(() => {
+     vi.clearAllMocks()
++    activeGatewayConnectionId.mockReturnValue(null)
++    requestGatewayForAgent.mockImplementation(async (_connectionId, _profile, method, params) => {
++      const gateway = activeGateway()
++
++      if (!gateway) {
++        throw new Error('Hermes gateway is not connected')
++      }
++
++      return gateway.request(method, params) as never
++    })
+     $activeGatewayProfile.set('default')
+     setShowAllProfiles(false)
+     $projects.set([alpha])
+@@ -308,6 +332,9 @@ describe('transactional Project renaming', () => {
+     let current = gatewayA
+ 
+     activeGateway.mockImplementation(() => current as never)
++    requestGatewayForAgent.mockImplementation(
++      async (_connectionId, _profile, method, params) => gatewayA.request(method, params) as never
++    )
+ 
+     const pending = withActiveProjectsContext(({ reconcile, renameMany }) =>
+       deleteProjectGroup({
+@@ -376,6 +403,9 @@ describe('transactional Project renaming', () => {
+     let current = gatewayA
+ 
+     activeGateway.mockImplementation(() => current as never)
++    requestGatewayForAgent.mockImplementation(
++      async (_connectionId, _profile, method, params) => gatewayA.request(method, params) as never
++    )
+ 
+     const pending = withActiveProjectsContext(({ reconcile, renameMany }) =>
+       deleteProjectGroup({
+@@ -412,6 +442,85 @@ describe('transactional Project renaming', () => {
+     expect($projects.get().map(project => project.id)).toEqual(['source-b'])
+     expect($projectTree.get().map(project => project.id)).toEqual(['source-b'])
+   })
++
++  it('reconnects the original pinned route for rollback after its socket closes and B becomes active', async () => {
++    const providerFailure = new Error('provider unavailable')
++    let projectNameOnA = alpha.name
++
++    const gatewayA = {
++      connectionState: 'open',
++      request: vi.fn(async (method: string, params?: Record<string, unknown>) => {
++        if (gatewayA.connectionState !== 'open') {
++          throw new Error('gateway A is disconnected')
++        }
++
++        if (method !== 'projects.rename_many') {
++          throw new Error(`unexpected ${method}`)
++        }
++
++        const [rename] = params?.renames as Array<{ expectedName: string; newName: string }>
++        expect(rename.expectedName).toBe(projectNameOnA)
++        projectNameOnA = rename.newName
++
++        if (projectNameOnA === 'Group · Alpha') {
++          gatewayA.connectionState = 'closed'
++        }
++
++        return { projects: [{ ...alpha, name: projectNameOnA }] }
++      })
++    }
++
++    const gatewayB = { connectionState: 'open', request: vi.fn() }
++    let current = gatewayA
++
++    activeGateway.mockImplementation(() => current as never)
++    activeGatewayConnectionId.mockReturnValue('source-a')
++    requestGatewayForAgent.mockImplementation(async (connectionId, profile, method, params) => {
++      expect(connectionId).toBe('source-a')
++      expect(profile).toBe('profile-a')
++
++      if (gatewayA.connectionState !== 'open') {
++        gatewayA.connectionState = 'open'
++      }
++
++      return gatewayA.request(method, params) as never
++    })
++    $activeGatewayProfile.set('profile-a')
++
++    const pending = withActiveProjectsContext(({ reconcile, renameMany }) =>
++      deleteProjectGroup({
++        contribution: {
++          deleteGroup: vi.fn(async () => {
++            current = gatewayB
++            $activeGatewayProfile.set('profile-b')
++            $projects.set([{ ...alpha, id: 'source-b', name: 'Source B' }])
++            $projectTree.set([{ id: 'source-b', label: 'Source B', path: '/b', repos: [], sessionCount: 0 }])
++            throw providerFailure
++          }),
++          getSnapshot: () => ({ groups: [{ id: 'group', label: 'Group', projectIds: [alpha.id] }] }),
++          subscribe: () => () => undefined
++        },
++        group: { id: 'group', label: 'Group', projectIds: [alpha.id] },
++        operationId: 'operation-a',
++        prependGroupName: true,
++        projects: [alpha],
++        reconcile,
++        renameMany
++      })
++    )
++
++    await expect(pending).rejects.toBe(providerFailure)
++    expect(projectNameOnA).toBe('Alpha')
++    expect(requestGatewayForAgent).toHaveBeenCalledTimes(2)
++    expect(
++      requestGatewayForAgent.mock.calls.every(
++        ([connectionId, profile]) => connectionId === 'source-a' && profile === 'profile-a'
++      )
++    ).toBe(true)
++    expect(gatewayB.request).not.toHaveBeenCalled()
++    expect($projects.get().map(project => project.id)).toEqual(['source-b'])
++    expect($projectTree.get().map(project => project.id)).toEqual(['source-b'])
++  })
+ })
+ 
+ describe('resolveNewSessionCwd', () => {
+diff --git a/apps/desktop/src/store/projects.ts b/apps/desktop/src/store/projects.ts
+index 919790c99..72a4f8afd 100644
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -13,7 +13,13 @@ import { desktopGit } from '@/lib/desktop-git'
+ import { isMissingRestEndpoint, isMissingRpcMethod } from '@/lib/gateway-rpc'
+ import { cleanPath, comparisonPath, isUnderPath } from '@/lib/path-compare'
+ import { persistentAtom } from '@/lib/persisted'
+-import { $gateway, activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
++import {
++  $gateway,
++  activeGateway,
++  activeGatewayConnectionId,
++  ensureActiveGatewayOpen,
++  requestGatewayForAgent
++} from '@/store/gateway'
+ import { setSidebarAgentsGrouped } from '@/store/layout'
+ import { notify } from '@/store/notifications'
+ import {
+@@ -373,6 +379,7 @@ async function gatewayRequestOn<T>(
+ }
+ 
+ interface ActiveProjectsContext {
++  connectionId: null | string
+   gateway: HermesGateway
+   profile: string
+ }
+@@ -394,11 +401,26 @@ async function activeProjectsContext(): Promise<ActiveProjectsContext> {
+     gateway = await ensureActiveGatewayOpen()
+   }
+ 
+-  if (!gateway || gateway !== activeGateway() || profile !== projectProfile()) {
++  const connectionId = activeGatewayConnectionId()
++
++  if (
++    !gateway ||
++    gateway !== activeGateway() ||
++    connectionId !== activeGatewayConnectionId() ||
++    profile !== projectProfile()
++  ) {
+     throw new Error('Active Hermes profile changed while connecting')
+   }
+ 
+-  return { gateway, profile }
++  return { connectionId, gateway, profile }
++}
++
++async function gatewayRequestForContext<T>(
++  context: ActiveProjectsContext,
++  method: string,
++  params: Record<string, unknown> = {}
++): Promise<T> {
++  return requestGatewayForAgent<T>(context.connectionId, context.profile, method, params)
+ }
+ 
+ function applyPayload(payload: ProjectsPayload): void {
+@@ -897,9 +919,9 @@ async function reconcileProjectsOn(context: ActiveProjectsContext, reportErrors
+   // the authority it mutated without advancing foreground generations or
+   // publishing that old source into the new source's caches.
+   const requests = [
+-    gatewayRequestOn<ProjectsPayload>(context.gateway, 'projects.list', projectParams({}, context.profile)),
+-    gatewayRequestOn<ProjectTreePayload>(
+-      context.gateway,
++    gatewayRequestForContext<ProjectsPayload>(context, 'projects.list', projectParams({}, context.profile)),
++    gatewayRequestForContext<ProjectTreePayload>(
++      context,
+       'projects.tree',
+       projectParams({ preview_limit: PROJECT_TREE_PREVIEW_LIMIT }, context.profile)
+     )
+@@ -1014,8 +1036,8 @@ async function renameProjectsManyOn(
+   let response: { projects: ProjectInfo[] }
+ 
+   try {
+-    response = await gatewayRequestOn<{ projects: ProjectInfo[] }>(
+-      context.gateway,
++    response = await gatewayRequestForContext<{ projects: ProjectInfo[] }>(
++      context,
+       'projects.rename_many',
+       projectParams({ renames: [...renames] }, context.profile)
+     )
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,7 +1,7 @@
-From 5b4cec3e7a6f3e5e44f9dd8aec91a1771f0cb8be Mon Sep 17 00:00:00 2001
+From 67d8696c7e70f902001d1ebdbe40c585ea151214 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 01:35:07 +0300
-Subject: [PATCH 4/9] feat(desktop): add native project group controls
+Subject: [PATCH 04/15] feat(desktop): add native project group controls
 
 ---
  apps/desktop/src/app/chat/sidebar/index.tsx   | 68 ++++++++++----

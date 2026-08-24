@@ -1,0 +1,1804 @@
+From 7b0e5013838c408e6a12760f1a14f3bbe2489e4e Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 03:52:49 +0300
+Subject: [PATCH 11/15] feat(desktop): add guarded project group deletion
+
+---
+ .../chat/sidebar/project-group-actions.tsx    |  60 +++++
+ .../project-group-delete-dialog.test.tsx      | 189 ++++++++++++++
+ .../sidebar/project-group-delete-dialog.tsx   | 242 ++++++++++++++++++
+ .../chat/sidebar/project-group-delete.test.ts | 157 ++++++++++++
+ .../app/chat/sidebar/project-group-delete.ts  | 208 +++++++++++++++
+ .../app/chat/sidebar/projects-presentation.ts |   7 +
+ .../chat/sidebar/sessions-section.test.tsx    |  59 ++++-
+ .../src/app/chat/sidebar/sessions-section.tsx |  79 +++---
+ apps/desktop/src/i18n/ar.ts                   |  14 +
+ apps/desktop/src/i18n/en.ts                   |  14 +
+ apps/desktop/src/i18n/ja.ts                   |  14 +
+ apps/desktop/src/i18n/types.ts                |  13 +
+ apps/desktop/src/i18n/zh-hant.ts              |  13 +
+ apps/desktop/src/i18n/zh.ts                   |  13 +
+ apps/desktop/src/sdk/index.ts                 |   5 +-
+ apps/desktop/src/store/projects.test.ts       |  81 +++++-
+ apps/desktop/src/store/projects.ts            |  62 +++++
+ hermes_cli/projects_db.py                     |  84 ++++++
+ tests/hermes_cli/test_projects_db.py          |  65 ++++-
+ tests/tui_gateway/test_projects_rpc.py        |  34 ++-
+ tui_gateway/server.py                         |  22 ++
+ 21 files changed, 1395 insertions(+), 40 deletions(-)
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-actions.tsx
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts
+ create mode 100644 apps/desktop/src/app/chat/sidebar/project-group-delete.ts
+
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-actions.tsx b/apps/desktop/src/app/chat/sidebar/project-group-actions.tsx
+new file mode 100644
+index 000000000..761255f5f
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-actions.tsx
+@@ -0,0 +1,60 @@
++import { useState } from 'react'
++
++import { ActionsMenu, renderActionItem } from '@/components/ui/actions-menu'
++import { Codicon } from '@/components/ui/codicon'
++import { useI18n } from '@/i18n'
++
++import type { ProjectGroupDeleteProject } from './project-group-delete'
++import { ProjectGroupDeleteDialog } from './project-group-delete-dialog'
++import type { ProjectGroupDescriptor, ProjectsGroupingContribution } from './projects-presentation'
++
++export function ProjectGroupActions({
++  contribution,
++  group,
++  projects
++}: {
++  contribution: ProjectsGroupingContribution
++  group: ProjectGroupDescriptor
++  projects: readonly ProjectGroupDeleteProject[]
++}) {
++  const { t } = useI18n()
++  const p = t.sidebar.projects
++  const [deleteOpen, setDeleteOpen] = useState(false)
++
++  if (!contribution.deleteGroup) {
++    return null
++  }
++
++  return (
++    <>
++      <ActionsMenu
++        ariaLabel={p.menu}
++        contentClassName="w-40"
++        items={kit =>
++          renderActionItem(kit, {
++            icon: 'trash',
++            key: 'delete-group',
++            label: p.deleteGroup,
++            onSelect: () => setDeleteOpen(true),
++            variant: 'destructive'
++          })
++        }
++      >
++        <button
++          aria-label={p.menu}
++          className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/project-group:opacity-100 data-[state=open]:opacity-100"
++          type="button"
++        >
++          <Codicon name="kebab-vertical" size="0.75rem" />
++        </button>
++      </ActionsMenu>
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={group}
++        onOpenChange={setDeleteOpen}
++        open={deleteOpen}
++        projects={projects}
++      />
++    </>
++  )
++}
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+new file mode 100644
+index 000000000..c1d13a1e7
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+@@ -0,0 +1,189 @@
++import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++import { ProjectGroupDeleteDialog } from './project-group-delete-dialog'
++import type { ProjectsGroupingContribution } from './projects-presentation'
++
++vi.mock('@/i18n', () => ({
++  useI18n: () => ({
++    t: {
++      common: {
++        cancel: 'Cancel',
++        close: 'Close',
++        confirm: 'Confirm',
++        done: 'Done',
++        loading: 'Loading…'
++      },
++      errors: { genericFailure: 'Something went wrong' },
++      sidebar: {
++        projects: {
++          deleteGroup: 'Delete group',
++          deleteGroupCollision: 'A resulting Project name already exists.',
++          deleteGroupCompensationFailed: (names: string) => `Rollback failed for: ${names}`,
++          deleteGroupEmptyDescription: 'The empty group will be removed.',
++          deleteGroupFailed: 'Could not delete project group',
++          deleteGroupMoveDescription: 'Every Project in this group will be moved to Ungrouped.',
++          deleteGroupPending: 'Deleting…',
++          deleteGroupPrepend: 'Prepend old group name to Project names',
++          deleteGroupPreviewAfter: 'Resulting names',
++          deleteGroupPreviewBefore: 'Current group',
++          deleteGroupPreviewLabel: 'Project rename preview',
++          deleteGroupStale: 'This group changed. Review it again.',
++          deleteGroupTitle: (name: string) => `Delete group “${name}”?`
++        }
++      }
++    }
++  })
++}))
++
++vi.mock('@/store/projects', () => ({
++  refreshProjectTree: vi.fn().mockResolvedValue(undefined),
++  refreshProjects: vi.fn().mockResolvedValue(undefined),
++  renameProjectsMany: vi.fn().mockResolvedValue([])
++}))
++
++const projects = [
++  { id: 'p_alpha', name: 'Alpha' },
++  { id: 'p_beta', name: 'Beta' },
++  { id: 'p_other', name: 'Other' }
++]
++
++function provider(group: { id: string; label: string; projectIds: string[] }, deleteGroup = vi.fn()) {
++  return {
++    contribution: {
++      deleteGroup,
++      getSnapshot: () => ({ groups: [group] }),
++      subscribe: () => () => undefined
++    } satisfies ProjectsGroupingContribution,
++    deleteGroup
++  }
++}
++
++afterEach(() => {
++  cleanup()
++  vi.clearAllMocks()
++})
++
++describe('ProjectGroupDeleteDialog', () => {
++  it('uses a compact confirmation for an empty group and sends the provider CAS request', async () => {
++    const group = { id: 'empty', label: 'Empty', projectIds: [] }
++    const { contribution, deleteGroup } = provider(group, vi.fn().mockResolvedValue(undefined))
++
++    render(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={group}
++        onOpenChange={vi.fn()}
++        open
++        projects={projects}
++      />
++    )
++
++    expect(screen.getByRole('heading', { name: 'Delete group “Empty”?' })).toBeTruthy()
++    expect(screen.getByText('The empty group will be removed.')).toBeTruthy()
++    expect(screen.queryByRole('checkbox')).toBeNull()
++    fireEvent.click(screen.getByRole('button', { name: 'Delete group' }))
++
++    await waitFor(() => expect(deleteGroup).toHaveBeenCalledOnce())
++    expect(deleteGroup).toHaveBeenCalledWith({
++      expectedProjectIds: [],
++      groupId: 'empty',
++      operationId: expect.any(String)
++    })
++  })
++
++  it('starts unchecked with no preview, then renders the exact tree-to-flat preview', async () => {
++    const group = { id: 'work', label: ' CUE++ ', projectIds: ['p_alpha', 'p_beta'] }
++    const { contribution } = provider(group)
++
++    render(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={group}
++        onOpenChange={vi.fn()}
++        open
++        projects={projects}
++      />
++    )
++
++    expect(screen.getByText('Every Project in this group will be moved to Ungrouped.')).toBeTruthy()
++    const checkbox = screen.getByRole('checkbox', { name: 'Prepend old group name to Project names' })
++    expect(checkbox.getAttribute('data-state')).toBe('unchecked')
++    expect(screen.queryByRole('group', { name: 'Project rename preview' })).toBeNull()
++
++    fireEvent.click(checkbox)
++
++    const preview = await screen.findByRole('group', { name: 'Project rename preview' })
++    const before = within(preview).getByRole('tree', { name: 'Current group' })
++    const after = within(preview).getByRole('list', { name: 'Resulting names' })
++    expect(
++      within(before)
++        .getAllByRole('treeitem')
++        .map(item => item.textContent)
++    ).toEqual(['CUE++AlphaBeta', 'Alpha', 'Beta'])
++    expect(
++      within(after)
++        .getAllByRole('listitem')
++        .map(item => item.textContent)
++    ).toEqual(['CUE++ · Alpha', 'CUE++ · Beta'])
++  })
++
++  it('blocks a colliding preview before mutation', async () => {
++    const group = { id: 'work', label: 'CUE++', projectIds: ['p_alpha'] }
++    const collidingProjects = [...projects, { id: 'collision', name: 'cue++ · alpha' }]
++    const { contribution, deleteGroup } = provider(group)
++
++    render(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={group}
++        onOpenChange={vi.fn()}
++        open
++        projects={collidingProjects}
++      />
++    )
++    fireEvent.click(screen.getByRole('checkbox'))
++
++    expect((await screen.findByRole('alert')).textContent).toContain('A resulting Project name already exists.')
++    expect((screen.getByRole('button', { name: 'Delete group' }) as HTMLButtonElement).disabled).toBe(true)
++    expect(deleteGroup).not.toHaveBeenCalled()
++  })
++
++  it('focuses the destructive action, supports Enter, and preserves selection on an inline error', async () => {
++    const group = { id: 'work', label: 'CUE++', projectIds: ['p_alpha'] }
++    let rejectDelete!: (error: Error) => void
++
++    const deletion = new Promise<void>((_resolve, reject) => {
++      rejectDelete = reject
++    })
++
++    const { contribution, deleteGroup } = provider(
++      group,
++      vi.fn(() => deletion)
++    )
++
++    render(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={group}
++        onOpenChange={vi.fn()}
++        open
++        projects={projects}
++      />
++    )
++    const checkbox = screen.getByRole('checkbox')
++    fireEvent.click(checkbox)
++    const deleteButton = screen.getByRole('button', { name: 'Delete group' })
++    await waitFor(() => expect(globalThis.document.activeElement).toBe(deleteButton))
++
++    fireEvent.keyDown(deleteButton, { key: 'Enter' })
++    await waitFor(() => expect(deleteGroup).toHaveBeenCalledOnce())
++    expect((screen.getByRole('button', { name: 'Deleting…' }) as HTMLButtonElement).disabled).toBe(true)
++    expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true)
++
++    rejectDelete(new Error('provider unavailable'))
++    expect((await screen.findByRole('alert')).textContent).toContain('provider unavailable')
++    expect(checkbox.getAttribute('data-state')).toBe('checked')
++    expect(screen.getByRole('group', { name: 'Project rename preview' })).toBeTruthy()
++  })
++})
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+new file mode 100644
+index 000000000..4fbf36a43
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+@@ -0,0 +1,242 @@
++import { useEffect, useMemo, useRef, useState } from 'react'
++
++import { Button } from '@/components/ui/button'
++import { Checkbox } from '@/components/ui/checkbox'
++import { ConfirmDialog } from '@/components/ui/confirm-dialog'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle
++} from '@/components/ui/dialog'
++import { ErrorBanner } from '@/components/ui/error-state'
++import { useI18n } from '@/i18n'
++import { refreshProjects, refreshProjectTree, renameProjectsMany } from '@/store/projects'
++
++import {
++  buildProjectGroupRenamePlan,
++  deleteProjectGroup,
++  ProjectGroupDeleteCompensationError,
++  type ProjectGroupDeleteProject,
++  ProjectGroupDeleteValidationError
++} from './project-group-delete'
++import type { ProjectGroupDescriptor, ProjectsGroupingContribution } from './projects-presentation'
++
++function createOperationId(): string {
++  return globalThis.crypto?.randomUUID?.() ?? `delete-group-${Date.now()}-${Math.random().toString(36).slice(2)}`
++}
++
++function uniqueMemberIds(group: ProjectGroupDescriptor): string[] {
++  return [...new Set(group.projectIds.map(id => id.trim()).filter(Boolean))]
++}
++
++export function ProjectGroupDeleteDialog({
++  contribution,
++  group,
++  open,
++  onOpenChange,
++  projects
++}: {
++  contribution: ProjectsGroupingContribution
++  group: ProjectGroupDescriptor
++  open: boolean
++  onOpenChange(open: boolean): void
++  projects: readonly ProjectGroupDeleteProject[]
++}) {
++  const { t } = useI18n()
++  const p = t.sidebar.projects
++  const [prependGroupName, setPrependGroupName] = useState(false)
++  const [pending, setPending] = useState(false)
++  const [error, setError] = useState<string | null>(null)
++  const [operationId, setOperationId] = useState(createOperationId)
++  const deleteButtonRef = useRef<HTMLButtonElement>(null)
++  const memberIds = useMemo(() => uniqueMemberIds(group), [group])
++  const projectsById = useMemo(() => new Map(projects.map(project => [project.id, project])), [projects])
++  const memberProjects = memberIds.map(id => projectsById.get(id)).filter(Boolean) as ProjectGroupDeleteProject[]
++  const missingMember = memberProjects.length !== memberIds.length
++
++  const renamePlan = useMemo(() => {
++    if (!prependGroupName || missingMember) {
++      return null
++    }
++
++    try {
++      return buildProjectGroupRenamePlan(group, projects)
++    } catch (reason) {
++      return reason
++    }
++  }, [group, missingMember, prependGroupName, projects])
++
++  const validationError = missingMember
++    ? new ProjectGroupDeleteValidationError('stale', 'A Project is missing from the deletion review')
++    : renamePlan instanceof ProjectGroupDeleteValidationError
++      ? renamePlan
++      : null
++
++  useEffect(() => {
++    if (!open) {
++      return
++    }
++
++    setPrependGroupName(false)
++    setPending(false)
++    setError(null)
++    setOperationId(createOperationId())
++  }, [open, group.id])
++
++  const errorMessage = (reason: unknown): string => {
++    if (reason instanceof ProjectGroupDeleteCompensationError) {
++      return p.deleteGroupCompensationFailed(reason.affectedProjects.map(project => project.name).join(', '))
++    }
++
++    if (reason instanceof ProjectGroupDeleteValidationError) {
++      return reason.reason === 'collision' ? p.deleteGroupCollision : p.deleteGroupStale
++    }
++
++    return reason instanceof Error && reason.message ? reason.message : p.deleteGroupFailed
++  }
++
++  const performDelete = async (prepend: boolean) => {
++    await deleteProjectGroup({
++      contribution,
++      group,
++      operationId,
++      prependGroupName: prepend,
++      projects,
++      reconcile: async () => {
++        await Promise.all([refreshProjects(), refreshProjectTree()])
++      },
++      renameMany: renameProjectsMany
++    })
++  }
++
++  if (memberIds.length === 0) {
++    return (
++      <ConfirmDialog
++        confirmLabel={p.deleteGroup}
++        description={p.deleteGroupEmptyDescription}
++        destructive
++        onClose={() => onOpenChange(false)}
++        onConfirm={async () => {
++          try {
++            await performDelete(false)
++          } catch (reason) {
++            throw new Error(errorMessage(reason))
++          }
++        }}
++        open={open}
++        title={p.deleteGroupTitle(group.label.trim())}
++      />
++    )
++  }
++
++  const submit = async () => {
++    if (pending || validationError) {
++      return
++    }
++
++    setPending(true)
++    setError(null)
++
++    try {
++      await performDelete(prependGroupName)
++      onOpenChange(false)
++    } catch (reason) {
++      setError(errorMessage(reason))
++    } finally {
++      setPending(false)
++    }
++  }
++
++  return (
++    <Dialog onOpenChange={value => !pending && onOpenChange(value)} open={open}>
++      <DialogContent
++        className="max-w-3xl"
++        onKeyDown={event => {
++          if (event.key === 'Enter' && !pending) {
++            event.preventDefault()
++            void submit()
++          }
++        }}
++        onOpenAutoFocus={event => {
++          event.preventDefault()
++          deleteButtonRef.current?.focus()
++        }}
++      >
++        <DialogHeader>
++          <DialogTitle>{p.deleteGroupTitle(group.label.trim())}</DialogTitle>
++          <DialogDescription>{p.deleteGroupMoveDescription}</DialogDescription>
++        </DialogHeader>
++
++        <label className="flex items-center gap-2 text-sm">
++          <Checkbox
++            checked={prependGroupName}
++            disabled={pending}
++            onCheckedChange={checked => setPrependGroupName(checked === true)}
++          />
++          <span>{p.deleteGroupPrepend}</span>
++        </label>
++
++        {prependGroupName && Array.isArray(renamePlan) ? (
++          <div aria-label={p.deleteGroupPreviewLabel} className="grid min-h-0 grid-cols-2 gap-4" role="group">
++            <section aria-labelledby="project-group-preview-before">
++              <h3 className="mb-2 text-xs font-semibold text-(--ui-text-secondary)" id="project-group-preview-before">
++                {p.deleteGroupPreviewBefore}
++              </h3>
++              <ul aria-label={p.deleteGroupPreviewBefore} className="text-sm" role="tree">
++                <li aria-expanded="true" role="treeitem">
++                  <span className="font-medium">{group.label.trim()}</span>
++                  <ul className="ml-4 mt-1 grid gap-1" role="group">
++                    {memberProjects.map(project => (
++                      <li key={project.id} role="treeitem">
++                        {project.name.trim()}
++                      </li>
++                    ))}
++                  </ul>
++                </li>
++              </ul>
++            </section>
++            <section
++              aria-labelledby="project-group-preview-after"
++              className="border-l border-(--ui-stroke-tertiary) pl-4"
++            >
++              <h3 className="mb-2 text-xs font-semibold text-(--ui-text-secondary)" id="project-group-preview-after">
++                {p.deleteGroupPreviewAfter}
++              </h3>
++              <ul aria-label={p.deleteGroupPreviewAfter} className="grid gap-1 text-sm">
++                {renamePlan.map(rename => (
++                  <li key={rename.id}>{rename.newName}</li>
++                ))}
++              </ul>
++            </section>
++          </div>
++        ) : null}
++
++        {(error || validationError) && (
++          <div role="alert">
++            <ErrorBanner>
++              {error ?? (validationError?.reason === 'collision' ? p.deleteGroupCollision : p.deleteGroupStale)}
++            </ErrorBanner>
++          </div>
++        )}
++
++        <DialogFooter>
++          <Button disabled={pending} onClick={() => onOpenChange(false)} type="button" variant="ghost">
++            {t.common.cancel}
++          </Button>
++          <Button
++            disabled={pending || Boolean(validationError)}
++            onClick={() => void submit()}
++            ref={deleteButtonRef}
++            type="button"
++            variant="destructive"
++          >
++            {pending ? p.deleteGroupPending : p.deleteGroup}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  )
++}
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts b/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts
+new file mode 100644
+index 000000000..208b67871
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete.test.ts
+@@ -0,0 +1,157 @@
++import { describe, expect, it, vi } from 'vitest'
++
++import {
++  buildProjectGroupRenamePlan,
++  deleteProjectGroup,
++  ProjectGroupDeleteCompensationError,
++  ProjectGroupDeleteValidationError
++} from './project-group-delete'
++import type { ProjectsGroupingContribution } from './projects-presentation'
++
++const group = { id: 'group-1', label: '  CUE++  ', projectIds: ['p_alpha', 'p_prefixed'] }
++
++const projects = [
++  { id: 'p_alpha', name: '  Alpha  ' },
++  { id: 'p_prefixed', name: 'cue++ · Already prefixed' },
++  { id: 'p_other', name: 'Other' }
++]
++
++function contribution(overrides: Partial<ProjectsGroupingContribution> = {}): ProjectsGroupingContribution {
++  return {
++    deleteGroup: vi.fn().mockResolvedValue(undefined),
++    getSnapshot: () => ({ groups: [group] }),
++    subscribe: () => () => undefined,
++    ...overrides
++  }
++}
++
++describe('Project group deletion saga', () => {
++  it('builds exact trimmed names without duplicating an existing case-insensitive prefix', () => {
++    expect(buildProjectGroupRenamePlan(group, projects)).toEqual([
++      { expectedName: '  Alpha  ', id: 'p_alpha', newName: 'CUE++ · Alpha' },
++      {
++        expectedName: 'cue++ · Already prefixed',
++        id: 'p_prefixed',
++        newName: 'cue++ · Already prefixed'
++      }
++    ])
++  })
++
++  it('deletes an unchecked group with only the provider CAS request', async () => {
++    const provider = contribution()
++    const renameMany = vi.fn()
++
++    await deleteProjectGroup({
++      contribution: provider,
++      group,
++      operationId: 'operation-1',
++      prependGroupName: false,
++      projects,
++      reconcile: vi.fn(),
++      renameMany
++    })
++
++    expect(renameMany).not.toHaveBeenCalled()
++    expect(provider.deleteGroup).toHaveBeenCalledWith({
++      expectedProjectIds: ['p_alpha', 'p_prefixed'],
++      groupId: 'group-1',
++      operationId: 'operation-1'
++    })
++  })
++
++  it('aborts on a stale member snapshot before either authority mutates', async () => {
++    const provider = contribution({
++      getSnapshot: () => ({ groups: [{ ...group, projectIds: ['p_alpha'] }] })
++    })
++
++    const renameMany = vi.fn()
++
++    await expect(
++      deleteProjectGroup({
++        contribution: provider,
++        group,
++        operationId: 'operation-1',
++        prependGroupName: true,
++        projects,
++        reconcile: vi.fn(),
++        renameMany
++      })
++    ).rejects.toBeInstanceOf(ProjectGroupDeleteValidationError)
++
++    expect(renameMany).not.toHaveBeenCalled()
++    expect(provider.deleteGroup).not.toHaveBeenCalled()
++  })
++
++  it('rolls every Project name back with CAS when provider deletion fails', async () => {
++    const providerFailure = new Error('provider unavailable')
++    const provider = contribution({ deleteGroup: vi.fn().mockRejectedValue(providerFailure) })
++    const renameMany = vi.fn().mockResolvedValue(projects)
++
++    await expect(
++      deleteProjectGroup({
++        contribution: provider,
++        group,
++        operationId: 'operation-1',
++        prependGroupName: true,
++        projects,
++        reconcile: vi.fn(),
++        renameMany
++      })
++    ).rejects.toBe(providerFailure)
++
++    expect(renameMany).toHaveBeenNthCalledWith(1, [
++      { expectedName: '  Alpha  ', id: 'p_alpha', newName: 'CUE++ · Alpha' },
++      {
++        expectedName: 'cue++ · Already prefixed',
++        id: 'p_prefixed',
++        newName: 'cue++ · Already prefixed'
++      }
++    ])
++    expect(renameMany).toHaveBeenNthCalledWith(2, [
++      { expectedName: 'CUE++ · Alpha', id: 'p_alpha', newName: '  Alpha  ' },
++      {
++        expectedName: 'cue++ · Already prefixed',
++        id: 'p_prefixed',
++        newName: 'cue++ · Already prefixed'
++      }
++    ])
++  })
++
++  it('reports affected Projects and forces reconciliation when compensation also fails', async () => {
++    const providerFailure = new Error('provider unavailable')
++    const rollbackFailure = new Error('rollback CAS failed')
++    const provider = contribution({ deleteGroup: vi.fn().mockRejectedValue(providerFailure) })
++    const renameMany = vi.fn().mockResolvedValueOnce(projects).mockRejectedValueOnce(rollbackFailure)
++    const reconcile = vi.fn().mockResolvedValue(undefined)
++
++    const error = await deleteProjectGroup({
++      contribution: provider,
++      group,
++      operationId: 'operation-1',
++      prependGroupName: true,
++      projects,
++      reconcile,
++      renameMany
++    }).catch(reason => reason)
++
++    expect(error).toBeInstanceOf(ProjectGroupDeleteCompensationError)
++    expect(error).toMatchObject({
++      affectedProjects: [
++        { id: 'p_alpha', name: 'CUE++ · Alpha' },
++        { id: 'p_prefixed', name: 'cue++ · Already prefixed' }
++      ],
++      providerError: providerFailure,
++      rollbackError: rollbackFailure
++    })
++    expect(reconcile).toHaveBeenCalledOnce()
++  })
++
++  it('rejects collisions with an ungrouped Project before writing', () => {
++    expect(() =>
++      buildProjectGroupRenamePlan({ id: 'group-1', label: 'CUE++', projectIds: ['p_alpha'] }, [
++        { id: 'p_alpha', name: 'Alpha' },
++        { id: 'p_other', name: 'cue++ · alpha' }
++      ])
++    ).toThrow(ProjectGroupDeleteValidationError)
++  })
++})
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete.ts b/apps/desktop/src/app/chat/sidebar/project-group-delete.ts
+new file mode 100644
+index 000000000..fa772e16e
+--- /dev/null
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete.ts
+@@ -0,0 +1,208 @@
++import type { ProjectNameCAS } from '@/store/projects'
++
++import type { ProjectGroupDescriptor, ProjectsGroupingContribution } from './projects-presentation'
++
++export interface ProjectGroupDeleteProject {
++  readonly id: string
++  readonly name: string
++}
++
++export type ProjectGroupDeleteValidationReason = 'collision' | 'invalid' | 'stale' | 'unsupported'
++
++export class ProjectGroupDeleteValidationError extends Error {
++  constructor(
++    readonly reason: ProjectGroupDeleteValidationReason,
++    message: string
++  ) {
++    super(message)
++    this.name = 'ProjectGroupDeleteValidationError'
++  }
++}
++
++export class ProjectGroupDeleteCompensationError extends Error {
++  readonly affectedProjects: readonly ProjectGroupDeleteProject[]
++
++  constructor(
++    readonly providerError: unknown,
++    readonly rollbackError: unknown,
++    affectedProjects: readonly ProjectGroupDeleteProject[],
++    readonly reconcileError?: unknown
++  ) {
++    const names = affectedProjects.map(project => project.name).join(', ')
++    super(`Project group deletion failed and Project name rollback also failed: ${names}`)
++    this.name = 'ProjectGroupDeleteCompensationError'
++    this.affectedProjects = affectedProjects
++  }
++}
++
++function normalizedMemberIds(projectIds: readonly string[]): string[] {
++  const result: string[] = []
++  const seen = new Set<string>()
++
++  for (const rawId of projectIds) {
++    const id = typeof rawId === 'string' ? rawId.trim() : ''
++
++    if (!id || seen.has(id)) {
++      continue
++    }
++
++    seen.add(id)
++    result.push(id)
++  }
++
++  return result
++}
++
++function sameMemberSet(left: readonly string[], right: readonly string[]): boolean {
++  const leftIds = normalizedMemberIds(left)
++  const rightIds = new Set(normalizedMemberIds(right))
++
++  return leftIds.length === rightIds.size && leftIds.every(id => rightIds.has(id))
++}
++
++export function buildProjectGroupRenamePlan(
++  group: ProjectGroupDescriptor,
++  projects: readonly ProjectGroupDeleteProject[]
++): ProjectNameCAS[] {
++  const groupName = group.label.trim()
++
++  if (!groupName) {
++    throw new ProjectGroupDeleteValidationError('invalid', 'Project group name is empty')
++  }
++
++  const byId = new Map(projects.map(project => [project.id, project]))
++  const prefix = `${groupName} · `
++  const lowerPrefix = prefix.toLowerCase()
++
++  const renames = normalizedMemberIds(group.projectIds).map(id => {
++    const project = byId.get(id)
++
++    if (!project) {
++      throw new ProjectGroupDeleteValidationError('stale', `Project ${id} is missing from the deletion review`)
++    }
++
++    const trimmedName = project.name.trim()
++
++    if (!trimmedName) {
++      throw new ProjectGroupDeleteValidationError('invalid', `Project ${id} has an empty name`)
++    }
++
++    return {
++      expectedName: project.name,
++      id,
++      newName: trimmedName.toLowerCase().startsWith(lowerPrefix) ? trimmedName : `${prefix}${trimmedName}`
++    }
++  })
++
++  const finalNames = new Map(projects.map(project => [project.id, project.name.trim()]))
++
++  for (const rename of renames) {
++    finalNames.set(rename.id, rename.newName)
++  }
++
++  const renamedIds = new Set(renames.map(rename => rename.id))
++  const idsByName = new Map<string, string[]>()
++
++  for (const [id, name] of finalNames) {
++    const key = name.toLowerCase()
++    idsByName.set(key, [...(idsByName.get(key) ?? []), id])
++  }
++
++  const collision = [...idsByName.entries()].find(([, ids]) => ids.length > 1 && ids.some(id => renamedIds.has(id)))
++
++  if (collision) {
++    throw new ProjectGroupDeleteValidationError(
++      'collision',
++      `Project name collision for ${finalNames.get(collision[1][0]) ?? collision[0]}`
++    )
++  }
++
++  return renames
++}
++
++export interface DeleteProjectGroupOptions {
++  readonly contribution: ProjectsGroupingContribution
++  readonly group: ProjectGroupDescriptor
++  readonly operationId: string
++  readonly prependGroupName: boolean
++  readonly projects: readonly ProjectGroupDeleteProject[]
++  readonly renameMany: (renames: readonly ProjectNameCAS[]) => Promise<unknown>
++  readonly reconcile: () => Promise<unknown>
++}
++
++/**
++ * Cross-authority deletion saga: validate the provider snapshot, CAS-rename
++ * Projects, delete provider membership, then CAS-compensate names on failure.
++ * A failed compensation is explicit and always triggers authoritative refresh.
++ */
++export async function deleteProjectGroup({
++  contribution,
++  group,
++  operationId,
++  prependGroupName,
++  projects,
++  renameMany,
++  reconcile
++}: DeleteProjectGroupOptions): Promise<void> {
++  if (!contribution.deleteGroup) {
++    throw new ProjectGroupDeleteValidationError('unsupported', 'The Project grouping provider cannot delete groups')
++  }
++
++  let currentGroup: ProjectGroupDescriptor | undefined
++
++  try {
++    currentGroup = contribution.getSnapshot().groups.find(candidate => candidate.id === group.id)
++  } catch {
++    throw new ProjectGroupDeleteValidationError('stale', 'The Project group snapshot could not be refreshed')
++  }
++
++  if (
++    !currentGroup ||
++    currentGroup.label.trim() !== group.label.trim() ||
++    !sameMemberSet(currentGroup.projectIds, group.projectIds)
++  ) {
++    throw new ProjectGroupDeleteValidationError('stale', 'The Project group changed since the deletion review')
++  }
++
++  const expectedProjectIds = normalizedMemberIds(group.projectIds)
++  const renames = prependGroupName ? buildProjectGroupRenamePlan(group, projects) : []
++
++  if (renames.length) {
++    await renameMany(renames)
++  }
++
++  try {
++    await contribution.deleteGroup({ expectedProjectIds, groupId: group.id, operationId })
++  } catch (providerError) {
++    if (!renames.length) {
++      throw providerError
++    }
++
++    const rollback = renames.map(rename => ({
++      expectedName: rename.newName,
++      id: rename.id,
++      newName: rename.expectedName
++    }))
++
++    try {
++      await renameMany(rollback)
++    } catch (rollbackError) {
++      let reconcileError: unknown
++
++      try {
++        await reconcile()
++      } catch (error) {
++        reconcileError = error
++      }
++
++      throw new ProjectGroupDeleteCompensationError(
++        providerError,
++        rollbackError,
++        renames.map(rename => ({ id: rename.id, name: rename.newName })),
++        reconcileError
++      )
++    }
++
++    throw providerError
++  }
++}
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index 5c61ab241..883ffed29 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -20,12 +20,19 @@ export interface ProjectsGroupingSnapshot {
+   readonly revision?: number | string
+ }
+ 
++export interface DeleteProjectGroupRequest {
++  readonly groupId: string
++  readonly expectedProjectIds: readonly string[]
++  readonly operationId: string
++}
++
+ export interface ProjectsGroupingContribution {
+   /** Keep the returned reference stable until the provider state changes.
+    *  The host also reuses structurally equivalent snapshots defensively. */
+   getSnapshot(): ProjectsGroupingSnapshot
+   subscribe(listener: () => void): () => void
+   createGroup?(name: string): Promise<void> | void
++  deleteGroup?(request: DeleteProjectGroupRequest): Promise<void>
+   assignProject?(projectId: string, groupId: string | null): Promise<void> | void
+   setGroupCollapsed?(groupId: string, collapsed: boolean): Promise<void> | void
+ }
+diff --git a/apps/desktop/src/app/chat/sidebar/sessions-section.test.tsx b/apps/desktop/src/app/chat/sidebar/sessions-section.test.tsx
+index b6dcd89c5..01ed6d810 100644
+--- a/apps/desktop/src/app/chat/sidebar/sessions-section.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/sessions-section.test.tsx
+@@ -2,12 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
+ import type * as React from 'react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ 
++import { registry } from '@/contrib/registry'
+ import type { SessionInfo } from '@/hermes'
+ import { notifyError } from '@/store/notifications'
+-import { registry } from '@/contrib/registry'
+ 
+-import { PROJECTS_GROUPING_AREA, type ProjectsGroupingContribution } from './projects-presentation'
+ import type { SidebarProjectTree } from './projects'
++import { PROJECTS_GROUPING_AREA, type ProjectsGroupingContribution } from './projects-presentation'
+ import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
+ import type { VirtualSessionListProps } from './virtual-session-list'
+ 
+@@ -15,12 +15,23 @@ const contributionDisposers: Array<() => void> = []
+ 
+ afterEach(() => {
+   cleanup()
+-  while (contributionDisposers.length) contributionDisposers.pop()?.()
++
++  while (contributionDisposers.length) {
++    contributionDisposers.pop()?.()
++  }
+ })
+ 
+ vi.mock('@/i18n', () => ({
+   useI18n: () => ({
+     t: {
++      common: {
++        cancel: 'Cancel',
++        close: 'Close',
++        confirm: 'Confirm',
++        done: 'Done',
++        loading: 'Loading…'
++      },
++      errors: { genericFailure: 'Something went wrong' },
+       sidebar: {
+         dateDivider: {
+           earlierThisMonth: 'Earlier this month',
+@@ -31,8 +42,12 @@ vi.mock('@/i18n', () => ({
+           yesterday: 'Yesterday'
+         },
+         projects: {
++          deleteGroup: 'Delete group',
++          deleteGroupEmptyDescription: 'The empty group will be removed.',
++          deleteGroupTitle: (name: string) => `Delete group “${name}”?`,
+           enter: (label: string) => `Enter ${label}`,
+           groupUpdateFailed: 'Could not update project group',
++          menu: 'Actions',
+           ungrouped: 'Ungrouped'
+         }
+       }
+@@ -177,7 +192,7 @@ describe('SidebarSessionsSection memoization & virtualizer stability', () => {
+         onToggleUnread={noop}
+         open={true}
+         pinned={false}
+-        projectOverview={[sidebarProject('a')]}
++        projectOverview={[]}
+         sessions={[]}
+       />
+     )
+@@ -187,6 +202,42 @@ describe('SidebarSessionsSection memoization & virtualizer stability', () => {
+     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(rejection, 'Could not update project group'))
+   })
+ 
++  it('places a native Actions/Delete control on deletable group headings', async () => {
++    const contribution: ProjectsGroupingContribution = {
++      deleteGroup: vi.fn().mockResolvedValue(undefined),
++      getSnapshot: () => ({ groups: [{ id: 'one', label: 'One', projectIds: [] }] }),
++      subscribe: () => () => undefined
++    }
++
++    contributionDisposers.push(
++      registry.register({ area: PROJECTS_GROUPING_AREA, data: contribution, id: 'deletable-provider' })
++    )
++
++    render(
++      <SidebarSessionsSection
++        activeSessionId={null}
++        emptyState={<div>Empty</div>}
++        label="Sessions"
++        onArchiveSession={noop}
++        onDeleteSession={noop}
++        onResumeSession={noop}
++        onToggle={noop}
++        onTogglePin={noop}
++        onToggleUnread={noop}
++        open={true}
++        pinned={false}
++        projectOverview={[sidebarProject('a')]}
++        sessions={[]}
++      />
++    )
++
++    const trigger = screen.getByRole('button', { name: 'Actions' })
++    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
++    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete group' }))
++
++    expect(await screen.findByRole('heading', { name: 'Delete group “One”?' })).toBeTruthy()
++  })
++
+   it('re-computes flatRows reference when grouping or sessions change', () => {
+     mockVirtualListPropsHistory.length = 0
+ 
+diff --git a/apps/desktop/src/app/chat/sidebar/sessions-section.tsx b/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
+index 12a3140f5..31a265a9c 100644
+--- a/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
++++ b/apps/desktop/src/app/chat/sidebar/sessions-section.tsx
+@@ -9,7 +9,6 @@ import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar'
+ import type { HermesGitWorktree } from '@/global'
+ import type { SessionInfo } from '@/hermes'
+ import { useI18n } from '@/i18n'
+-import { notifyError } from '@/store/notifications'
+ import { flattenSessionsWithBranches } from '@/lib/session-branch-tree'
+ import {
+   groupEntriesByRecency,
+@@ -19,12 +18,13 @@ import {
+ } from '@/lib/session-date-groups'
+ import { sessionBucketLabel } from '@/lib/time'
+ import { cn } from '@/lib/utils'
++import { notifyError } from '@/store/notifications'
+ import { sessionPinId } from '@/store/session'
+ import { $sessionDotStateById, hasLiveTurn } from '@/store/session-dot-state'
+ 
+ import { SidebarDateDivider, SidebarSectionMeta } from './chrome'
+-import { useProjectsGrouping } from './projects-presentation'
+ import { orderRowsWithinGroups, reorderableRowIds } from './order'
++import { ProjectGroupActions } from './project-group-actions'
+ import {
+   EnteredProjectContent,
+   ProjectOverviewRow,
+@@ -33,6 +33,7 @@ import {
+   SidebarWorkspaceGroup,
+   type SidebarWorkspaceTree
+ } from './projects'
++import { useProjectsGrouping } from './projects-presentation'
+ import { WorkspaceAddButton } from './projects/workspace-header'
+ import { ReorderableList, useSortableBindings } from './reorderable-list'
+ import { SidebarSessionSkeletons } from './section-states'
+@@ -225,7 +226,7 @@ export function SidebarSessionsSection({
+   const hasGroupedSessions = Boolean(groups?.some(group => group.sessions.length > 0))
+   // A defined project list is itself content (even an empty project should
+   // render as a drill-in row so the user can see it exists).
+-  const hasProjectOverview = Boolean(projectOverview?.length)
++  const hasProjectOverview = Boolean(projectOverview?.length || projectsGrouping?.groups.length)
+ 
+   // Lanes count as content even with no rows left in them: the backend only
+   // emits a lane that has sessions, so a lane surviving with zero rows means
+@@ -406,11 +407,12 @@ export function SidebarSessionsSection({
+     )
+   } else if (showEmptyState) {
+     inner = emptyState
+-  } else if (projectOverview?.length) {
++  } else if (projectOverview) {
+     const presented = projectsGrouping
+ 
+     if (presented) {
+       const NativeRow = ProjectOverviewRow
++
+       const nativeRow = (project: SidebarProjectTree) => (
+         <NativeRow
+           activeProjectId={activeProjectId}
+@@ -426,31 +428,50 @@ export function SidebarSessionsSection({
+       inner = (
+         <>
+           {presented.home && nativeRow(presented.home)}
+-          {presented.groups.map(group => (
+-            <div className="pb-1" key={group.id}>
+-              <button
+-                aria-expanded={!group.collapsed}
+-                className="flex w-full items-center gap-1 px-2 pb-1 pt-1.5 text-left text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)"
+-                disabled={!presented.contribution.setGroupCollapsed}
+-                onClick={() => {
+-                  if (!presented.contribution.setGroupCollapsed) return
+-                  const onError = (error: unknown) => notifyError(error, t.sidebar.projects.groupUpdateFailed)
+-                  try {
+-                    void Promise.resolve(presented.contribution.setGroupCollapsed(group.id, !group.collapsed)).catch(
+-                      onError
+-                    )
+-                  } catch (error) {
+-                    onError(error)
+-                  }
+-                }}
+-                type="button"
+-              >
+-                <DisclosureCaret open={!group.collapsed} />
+-                {group.label}
+-              </button>
+-              {!group.collapsed && group.projects.map(nativeRow)}
+-            </div>
+-          ))}
++          {presented.groups.map(group => {
++            const descriptor = presented.snapshot.groups.find(candidate => candidate.id === group.id)
++
++            return (
++              <div className="group/project-group pb-1" key={group.id}>
++                <div className="flex items-center gap-1 pr-2">
++                  <button
++                    aria-expanded={!group.collapsed}
++                    className="flex min-w-0 flex-1 items-center gap-1 px-2 pb-1 pt-1.5 text-left text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)"
++                    disabled={!presented.contribution.setGroupCollapsed}
++                    onClick={() => {
++                      if (!presented.contribution.setGroupCollapsed) {
++                        return
++                      }
++
++                      const onError = (error: unknown) => notifyError(error, t.sidebar.projects.groupUpdateFailed)
++
++                      try {
++                        void Promise.resolve(
++                          presented.contribution.setGroupCollapsed(group.id, !group.collapsed)
++                        ).catch(onError)
++                      } catch (error) {
++                        onError(error)
++                      }
++                    }}
++                    type="button"
++                  >
++                    <DisclosureCaret open={!group.collapsed} />
++                    {group.label}
++                  </button>
++                  {descriptor ? (
++                    <ProjectGroupActions
++                      contribution={presented.contribution}
++                      group={descriptor}
++                      projects={projectOverview
++                        .filter(project => !project.isNoProject)
++                        .map(project => ({ id: project.id, name: project.label }))}
++                    />
++                  ) : null}
++                </div>
++                {!group.collapsed && group.projects.map(nativeRow)}
++              </div>
++            )
++          })}
+           {presented.ungrouped.length > 0 && (
+             <div className="pb-1">
+               <div className="px-2 pb-1 pt-1.5 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
+diff --git a/apps/desktop/src/i18n/ar.ts b/apps/desktop/src/i18n/ar.ts
+index c9db8298e..c03011ed9 100644
+--- a/apps/desktop/src/i18n/ar.ts
++++ b/apps/desktop/src/i18n/ar.ts
+@@ -1713,6 +1713,20 @@ export const ar = defineLocale({
+       groupNameDuplicate: 'توجد مجموعة بهذا الاسم بالفعل.',
+       groupCreateFailed: 'تعذر إنشاء مجموعة المشاريع',
+       groupUpdateFailed: 'تعذر تحديث مجموعة المشاريع',
++      deleteGroup: 'حذف المجموعة',
++      deleteGroupTitle: name => `حذف المجموعة «${name}»؟`,
++      deleteGroupEmptyDescription: 'ستُحذف المجموعة الفارغة.',
++      deleteGroupMoveDescription: 'سيُنقل كل مشروع في هذه المجموعة إلى «غير مجمّع».',
++      deleteGroupPrepend: 'إضافة اسم المجموعة القديم إلى أسماء المشاريع',
++      deleteGroupPreviewBefore: 'المجموعة الحالية',
++      deleteGroupPreviewAfter: 'الأسماء الناتجة',
++      deleteGroupPreviewLabel: 'معاينة إعادة تسمية المشاريع',
++      deleteGroupPending: 'جار الحذف…',
++      deleteGroupStale: 'تغيّرت هذه المجموعة. راجعها مجدداً قبل الحذف.',
++      deleteGroupCollision: 'يوجد اسم مشروع ناتج بالفعل.',
++      deleteGroupFailed: 'تعذر حذف مجموعة المشاريع',
++      deleteGroupCompensationFailed: names =>
++        `تعذر حذف المجموعة وتعذر استعادة أسماء المشاريع التالية: ${names}. تم تحديث الحالة الموثوقة.`,
+       moveToGroup: 'نقل إلى مجموعة',
+       ungrouped: 'غير مجمّع',
+       menu: 'إجراءات',
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index fd27d1b5b..23961a44e 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -2169,6 +2169,20 @@ export const en: Translations = {
+       groupNameDuplicate: 'A group with this name already exists.',
+       groupCreateFailed: 'Could not create project group',
+       groupUpdateFailed: 'Could not update project group',
++      deleteGroup: 'Delete group',
++      deleteGroupTitle: name => `Delete group “${name}”?`,
++      deleteGroupEmptyDescription: 'The empty group will be removed.',
++      deleteGroupMoveDescription: 'Every Project in this group will be moved to Ungrouped.',
++      deleteGroupPrepend: 'Prepend old group name to Project names',
++      deleteGroupPreviewBefore: 'Current group',
++      deleteGroupPreviewAfter: 'Resulting names',
++      deleteGroupPreviewLabel: 'Project rename preview',
++      deleteGroupPending: 'Deleting…',
++      deleteGroupStale: 'This group changed. Review it again before deleting.',
++      deleteGroupCollision: 'A resulting Project name already exists.',
++      deleteGroupFailed: 'Could not delete project group',
++      deleteGroupCompensationFailed: names =>
++        `The group could not be deleted and these Project names could not be restored: ${names}. The authoritative state has been refreshed.`,
+       moveToGroup: 'Move to group',
+       ungrouped: 'Ungrouped',
+       menu: 'Actions',
+diff --git a/apps/desktop/src/i18n/ja.ts b/apps/desktop/src/i18n/ja.ts
+index 0aae066d6..4d1c8263f 100644
+--- a/apps/desktop/src/i18n/ja.ts
++++ b/apps/desktop/src/i18n/ja.ts
+@@ -1881,6 +1881,20 @@ export const ja = defineLocale({
+       groupNameDuplicate: '同じ名前のグループが既にあります。',
+       groupCreateFailed: 'プロジェクトグループを作成できませんでした',
+       groupUpdateFailed: 'プロジェクトグループを更新できませんでした',
++      deleteGroup: 'グループを削除',
++      deleteGroupTitle: name => `グループ「${name}」を削除しますか？`,
++      deleteGroupEmptyDescription: '空のグループを削除します。',
++      deleteGroupMoveDescription: 'このグループ内のすべてのプロジェクトは「グループなし」に移動します。',
++      deleteGroupPrepend: 'プロジェクト名の先頭に以前のグループ名を付ける',
++      deleteGroupPreviewBefore: '現在のグループ',
++      deleteGroupPreviewAfter: '変更後の名前',
++      deleteGroupPreviewLabel: 'プロジェクト名変更のプレビュー',
++      deleteGroupPending: '削除中…',
++      deleteGroupStale: 'このグループは変更されました。削除前にもう一度確認してください。',
++      deleteGroupCollision: '変更後のプロジェクト名が既に存在します。',
++      deleteGroupFailed: 'プロジェクトグループを削除できませんでした',
++      deleteGroupCompensationFailed: names =>
++        `グループを削除できず、次のプロジェクト名も復元できませんでした：${names}。最新の状態に更新しました。`,
+       moveToGroup: 'グループへ移動',
+       ungrouped: 'グループなし',
+       menu: 'アクション',
+diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
+index f0e660c5d..e081b977c 100644
+--- a/apps/desktop/src/i18n/types.ts
++++ b/apps/desktop/src/i18n/types.ts
+@@ -1838,6 +1838,19 @@ export interface Translations {
+       groupNameDuplicate: string
+       groupCreateFailed: string
+       groupUpdateFailed: string
++      deleteGroup: string
++      deleteGroupTitle: (name: string) => string
++      deleteGroupEmptyDescription: string
++      deleteGroupMoveDescription: string
++      deleteGroupPrepend: string
++      deleteGroupPreviewBefore: string
++      deleteGroupPreviewAfter: string
++      deleteGroupPreviewLabel: string
++      deleteGroupPending: string
++      deleteGroupStale: string
++      deleteGroupCollision: string
++      deleteGroupFailed: string
++      deleteGroupCompensationFailed: (names: string) => string
+       moveToGroup: string
+       ungrouped: string
+       menu: string
+diff --git a/apps/desktop/src/i18n/zh-hant.ts b/apps/desktop/src/i18n/zh-hant.ts
+index e66aea890..d3801e988 100644
+--- a/apps/desktop/src/i18n/zh-hant.ts
++++ b/apps/desktop/src/i18n/zh-hant.ts
+@@ -1819,6 +1819,19 @@ export const zhHant = defineLocale({
+       groupNameDuplicate: '已存在同名群組。',
+       groupCreateFailed: '無法建立專案群組',
+       groupUpdateFailed: '無法更新專案群組',
++      deleteGroup: '刪除群組',
++      deleteGroupTitle: name => `刪除群組「${name}」？`,
++      deleteGroupEmptyDescription: '此空群組將被刪除。',
++      deleteGroupMoveDescription: '此群組中的所有專案都將移至「未分組」。',
++      deleteGroupPrepend: '在專案名稱前加上舊群組名稱',
++      deleteGroupPreviewBefore: '目前群組',
++      deleteGroupPreviewAfter: '變更後的名稱',
++      deleteGroupPreviewLabel: '專案重新命名預覽',
++      deleteGroupPending: '正在刪除…',
++      deleteGroupStale: '此群組已變更。請重新檢查後再刪除。',
++      deleteGroupCollision: '變更後的專案名稱已存在。',
++      deleteGroupFailed: '無法刪除專案群組',
++      deleteGroupCompensationFailed: names => `無法刪除群組，且下列專案名稱無法還原：${names}。已重新整理權威狀態。`,
+       moveToGroup: '移至群組',
+       ungrouped: '未分組',
+       menu: '動作',
+diff --git a/apps/desktop/src/i18n/zh.ts b/apps/desktop/src/i18n/zh.ts
+index e21997d4e..87dbcfcec 100644
+--- a/apps/desktop/src/i18n/zh.ts
++++ b/apps/desktop/src/i18n/zh.ts
+@@ -2352,6 +2352,19 @@ export const zh: Translations = {
+       groupNameDuplicate: '已存在同名分组。',
+       groupCreateFailed: '无法创建项目分组',
+       groupUpdateFailed: '无法更新项目分组',
++      deleteGroup: '删除分组',
++      deleteGroupTitle: name => `删除分组“${name}”？`,
++      deleteGroupEmptyDescription: '此空分组将被删除。',
++      deleteGroupMoveDescription: '此分组中的所有项目都将移至“未分组”。',
++      deleteGroupPrepend: '在项目名称前添加原分组名称',
++      deleteGroupPreviewBefore: '当前分组',
++      deleteGroupPreviewAfter: '变更后的名称',
++      deleteGroupPreviewLabel: '项目重命名预览',
++      deleteGroupPending: '正在删除…',
++      deleteGroupStale: '此分组已发生变化。请重新检查后再删除。',
++      deleteGroupCollision: '变更后的项目名称已存在。',
++      deleteGroupFailed: '无法删除项目分组',
++      deleteGroupCompensationFailed: names => `无法删除分组，且以下项目名称无法还原：${names}。已刷新权威状态。`,
+       moveToGroup: '移动到分组',
+       ungrouped: '未分组',
+       menu: '操作',
+diff --git a/apps/desktop/src/sdk/index.ts b/apps/desktop/src/sdk/index.ts
+index c1ef9a2cb..fbbab1874 100644
+--- a/apps/desktop/src/sdk/index.ts
++++ b/apps/desktop/src/sdk/index.ts
+@@ -1167,14 +1167,15 @@ export {
+ 
+ // -- ui: the design language --------------------------------------------------
+ 
+-export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
+-export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
+ export {
++  type DeleteProjectGroupRequest,
+   type ProjectGroupDescriptor,
+   PROJECTS_GROUPING_AREA,
+   type ProjectsGroupingContribution,
+   type ProjectsGroupingSnapshot
+ } from '@/app/chat/sidebar/projects-presentation'
++export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
++export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
+ /** THE full per-toolset config panel core Settings renders — provider picker,
+  *  env vars / API keys, model catalog picker, and post-setup runners. Route-
+  *  decoupled (the "manage keys" deep link is a no-op outside the router); pass
+diff --git a/apps/desktop/src/store/projects.test.ts b/apps/desktop/src/store/projects.test.ts
+index 15e5544cb..5a9c979a1 100644
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -1,11 +1,11 @@
+-import { atom } from 'nanostores'
+ import { JsonRpcGatewayError } from '@hermes/shared'
++import { atom } from 'nanostores'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
+ import {
+   PROJECTS_GROUPING_AREA,
+-  resolveProjectsGrouping,
+-  type ProjectsGroupingContribution
++  type ProjectsGroupingContribution,
++  resolveProjectsGrouping
+ } from '@/app/chat/sidebar/projects-presentation'
+ import { NO_PROJECT_ID, type SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
+ import { registry } from '@/contrib/registry'
+@@ -37,6 +37,7 @@ import {
+   refreshProjects,
+   refreshProjectTree,
+   refreshWorktrees,
++  renameProjectsMany,
+   resolveNewSessionCwd,
+   scanAndRecordRepos,
+   setProjectAppearance,
+@@ -185,6 +186,80 @@ describe('projects RPC profile forwarding', () => {
+   })
+ })
+ 
++describe('transactional Project renaming', () => {
++  const alpha = {
++    archived: false,
++    board_slug: 'alpha-board',
++    color: '#123456',
++    created_at: 1,
++    description: 'Alpha description',
++    folders: [{ added_at: 1, is_primary: true, label: null, path: '/alpha' }],
++    icon: 'rocket',
++    id: 'p_alpha',
++    name: 'Alpha',
++    primary_path: '/alpha',
++    slug: 'alpha'
++  }
++
++  beforeEach(() => {
++    vi.clearAllMocks()
++    $activeGatewayProfile.set('default')
++    setShowAllProfiles(false)
++    $projects.set([alpha])
++    $projectTree.set([
++      {
++        color: alpha.color,
++        icon: alpha.icon,
++        id: alpha.id,
++        label: alpha.name,
++        path: alpha.primary_path,
++        repos: [],
++        sessionCount: 3,
++        totalTokens: 42
++      } as SidebarProjectTree
++    ])
++  })
++
++  it('calls projects.rename_many with CAS inputs and applies authoritative records as one cache update', async () => {
++    const renamed = { ...alpha, name: 'Group · Alpha' }
++    const request = vi.fn().mockResolvedValue({ projects: [renamed] })
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++
++    await expect(
++      renameProjectsMany([{ expectedName: 'Alpha', id: alpha.id, newName: 'Group · Alpha' }])
++    ).resolves.toEqual([renamed])
++
++    expect(request).toHaveBeenCalledWith('projects.rename_many', {
++      profile: 'default',
++      renames: [{ expectedName: 'Alpha', id: alpha.id, newName: 'Group · Alpha' }]
++    })
++    expect($projects.get()).toEqual([renamed])
++    expect($projectTree.get()[0]).toMatchObject({
++      color: '#123456',
++      icon: 'rocket',
++      id: alpha.id,
++      label: 'Group · Alpha',
++      path: '/alpha',
++      sessionCount: 3,
++      totalTokens: 42
++    })
++  })
++
++  it('does not mutate either renderer cache when the CAS request fails', async () => {
++    const beforeProjects = $projects.get()
++    const beforeTree = $projectTree.get()
++    const rejection = new Error('stale Project name')
++    activeGateway.mockReturnValue({ connectionState: 'open', request: vi.fn().mockRejectedValue(rejection) } as never)
++
++    await expect(
++      renameProjectsMany([{ expectedName: 'Old Alpha', id: alpha.id, newName: 'Group · Alpha' }])
++    ).rejects.toBe(rejection)
++
++    expect($projects.get()).toBe(beforeProjects)
++    expect($projectTree.get()).toBe(beforeTree)
++  })
++})
++
+ describe('resolveNewSessionCwd', () => {
+   beforeEach(() => {
+     $projectScope.set(ALL_PROJECTS)
+diff --git a/apps/desktop/src/store/projects.ts b/apps/desktop/src/store/projects.ts
+index 387541e29..4fd6bdbed 100644
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -978,6 +978,68 @@ export async function renameProject(id: string, name: string): Promise<void> {
+   await updateProject(id, { name })
+ }
+ 
++export interface ProjectNameCAS {
++  readonly id: string
++  readonly expectedName: string
++  readonly newName: string
++}
++
++// Transactional, non-optimistic adapter for cross-authority group deletion.
++// The backend validates the whole CAS batch and returns every authoritative
++// Project record. Renderer caches publish only after that complete response is
++// validated, so a rejected batch cannot paint a partial rename.
++export async function renameProjectsMany(renames: readonly ProjectNameCAS[]): Promise<ProjectInfo[]> {
++  if ($projectsRpcAvailable.get() === false) {
++    throw projectsStaleBackendError()
++  }
++
++  let response: { projects: ProjectInfo[] }
++
++  try {
++    response = await gatewayRequest<{ projects: ProjectInfo[] }>(
++      'projects.rename_many',
++      projectParams({ renames: [...renames] })
++    )
++  } catch (error) {
++    markProjectsRpcFailure(error)
++
++    if (isMissingRpcMethod(error)) {
++      throw projectsStaleBackendError()
++    }
++
++    throw error
++  }
++
++  const requestedIds = new Set(renames.map(rename => rename.id))
++  const returnedIds = new Set(response.projects?.map(project => project.id) ?? [])
++
++  if (
++    !Array.isArray(response.projects) ||
++    requestedIds.size !== renames.length ||
++    returnedIds.size !== requestedIds.size ||
++    [...requestedIds].some(id => !returnedIds.has(id))
++  ) {
++    reconcileProjects()
++    throw new Error('projects.rename_many returned an incomplete Project set')
++  }
++
++  const byId = new Map(response.projects.map(project => [project.id, project]))
++  batch(() => {
++    $projects.set($projects.get().map(project => byId.get(project.id) ?? project))
++    $projectTree.set(
++      $projectTree.get().map(project => {
++        const renamed = byId.get(project.id)
++
++        return renamed ? { ...project, label: renamed.name } : project
++      })
++    )
++  })
++
++  markProjectsRpcSuccess()
++
++  return response.projects
++}
++
+ // Patch top-level project fields (name / appearance). Optimistic: the cached
+ // tree + list update instantly so a color/icon/name change has no round-trip
+ // lag; only a failed write reconciles from the server.
+diff --git a/hermes_cli/projects_db.py b/hermes_cli/projects_db.py
+index 12eb206dd..f052e1a43 100644
+--- a/hermes_cli/projects_db.py
++++ b/hermes_cli/projects_db.py
+@@ -500,6 +500,90 @@ def update_project(
+     return cur.rowcount > 0
+ 
+ 
++def rename_many(conn: sqlite3.Connection, renames: Iterable[dict]) -> List[Project]:
++    """Atomically compare-and-swap a set of Project names.
++
++    Every input must contain ``id``, ``expected_name``, and ``new_name``.
++    Validation and writes share one IMMEDIATE transaction so a stale Project or
++    final-name collision leaves every name untouched.  Only the display name is
++    updated; stable ids, slugs, folders, active state, appearance, board links,
++    and all external session/worktree relationships remain unchanged.
++    """
++    requested = list(renames)
++    if not requested:
++        return []
++
++    normalized: List[tuple[str, str, str]] = []
++    seen_ids: set[str] = set()
++    for raw in requested:
++        if not isinstance(raw, dict):
++            raise ValueError("each project rename must be an object")
++        project_id = raw.get("id")
++        expected_name = raw.get("expected_name")
++        new_name = raw.get("new_name")
++        if not isinstance(project_id, str) or not project_id.strip():
++            raise ValueError("project rename id must not be empty")
++        if not isinstance(expected_name, str):
++            raise ValueError("project rename expected_name must be a string")
++        if not isinstance(new_name, str) or not new_name.strip():
++            raise ValueError("project rename new_name must not be empty")
++
++        project_id = project_id.strip()
++        if project_id in seen_ids:
++            raise ValueError(f"duplicate project rename id: {project_id}")
++        seen_ids.add(project_id)
++        normalized.append((project_id, expected_name, new_name.strip()))
++
++    with write_txn(conn):
++        rows = conn.execute("SELECT id, name FROM projects").fetchall()
++        current_names = {row["id"]: row["name"] for row in rows}
++
++        for project_id, expected_name, _new_name in normalized:
++            current = current_names.get(project_id)
++            if current is None:
++                raise ValueError(f"project {project_id} no longer exists")
++            if current != expected_name:
++                raise ValueError(
++                    f"project {project_id} changed since the deletion review "
++                    f"(expected {expected_name!r}, found {current!r})"
++                )
++
++        final_names = dict(current_names)
++        for project_id, _expected_name, new_name in normalized:
++            final_names[project_id] = new_name
++
++        requested_ids = {project_id for project_id, _expected, _new in normalized}
++        for project_id in requested_ids:
++            collision_key = final_names[project_id].casefold()
++            conflicting = [
++                other_id
++                for other_id, other_name in final_names.items()
++                if other_id != project_id and other_name.strip().casefold() == collision_key
++            ]
++            if conflicting:
++                raise ValueError(
++                    f"project name collision for {final_names[project_id]!r}: "
++                    f"{project_id} conflicts with {conflicting[0]}"
++                )
++
++        for project_id, expected_name, new_name in normalized:
++            updated = conn.execute(
++                "UPDATE projects SET name = ? WHERE id = ? AND name = ?",
++                (new_name, project_id, expected_name),
++            )
++            if updated.rowcount != 1:
++                raise ValueError(f"project {project_id} changed during rename")
++
++        result: List[Project] = []
++        for project_id, _expected_name, _new_name in normalized:
++            project = get_project(conn, project_id)
++            if project is None:  # Defensive: the write transaction guaranteed it.
++                raise RuntimeError(f"renamed project {project_id} disappeared")
++            result.append(project)
++
++    return result
++
++
+ def add_folder(
+     conn: sqlite3.Connection,
+     project_id: str,
+diff --git a/tests/hermes_cli/test_projects_db.py b/tests/hermes_cli/test_projects_db.py
+index 81a8bb1ef..3c82890b5 100644
+--- a/tests/hermes_cli/test_projects_db.py
++++ b/tests/hermes_cli/test_projects_db.py
+@@ -55,6 +55,70 @@ def test_create_get_list(conn):
+     assert len(pdb.list_projects(conn)) == 1
+ 
+ 
++def test_rename_many_is_cas_atomic_and_preserves_project_metadata(conn):
++    first = pdb.create_project(
++        conn,
++        name="Alpha",
++        folders=["/work/alpha"],
++        description="first",
++        icon="rocket",
++        color="#123456",
++        board_slug="alpha-board",
++    )
++    second = pdb.create_project(conn, name="Beta", folders=["/work/beta"])
++    pdb.set_active(conn, first)
++
++    renamed = pdb.rename_many(
++        conn,
++        [
++            {"id": first, "expected_name": "Alpha", "new_name": "Group · Alpha"},
++            {"id": second, "expected_name": "Beta", "new_name": "Group · Beta"},
++        ],
++    )
++
++    assert [project.name for project in renamed] == ["Group · Alpha", "Group · Beta"]
++    preserved = pdb.get_project(conn, first)
++    assert preserved is not None
++    assert preserved.slug == "alpha"
++    assert preserved.description == "first"
++    assert preserved.icon == "rocket"
++    assert preserved.color == "#123456"
++    assert preserved.board_slug == "alpha-board"
++    assert [folder.path for folder in preserved.folders] == ["/work/alpha"]
++    assert pdb.get_active_id(conn) == first
++
++
++def test_rename_many_rejects_stale_batch_without_writing_any_name(conn):
++    first = pdb.create_project(conn, name="Alpha")
++    second = pdb.create_project(conn, name="Beta")
++
++    with pytest.raises(ValueError, match="changed since the deletion review"):
++        pdb.rename_many(
++            conn,
++            [
++                {"id": first, "expected_name": "Alpha", "new_name": "Group · Alpha"},
++                {"id": second, "expected_name": "Stale Beta", "new_name": "Group · Beta"},
++            ],
++        )
++
++    assert pdb.get_project(conn, first).name == "Alpha"
++    assert pdb.get_project(conn, second).name == "Beta"
++
++
++def test_rename_many_rejects_final_name_collisions_before_writing(conn):
++    first = pdb.create_project(conn, name="Alpha")
++    second = pdb.create_project(conn, name="Existing")
++
++    with pytest.raises(ValueError, match="project name collision"):
++        pdb.rename_many(
++            conn,
++            [{"id": first, "expected_name": "Alpha", "new_name": " existing "}],
++        )
++
++    assert pdb.get_project(conn, first).name == "Alpha"
++    assert pdb.get_project(conn, second).name == "Existing"
++
++
+ 
+ 
+ 
+@@ -143,4 +207,3 @@ def test_per_profile_isolation(tmp_path):
+         a.close()
+         b.close()
+ 
+-
+diff --git a/tests/tui_gateway/test_projects_rpc.py b/tests/tui_gateway/test_projects_rpc.py
+index a2f931482..f0850ecb5 100644
+--- a/tests/tui_gateway/test_projects_rpc.py
++++ b/tests/tui_gateway/test_projects_rpc.py
+@@ -52,6 +52,7 @@ def test_methods_registered():
+         "projects.create",
+         "projects.get",
+         "projects.update",
++        "projects.rename_many",
+         "projects.add_folder",
+         "projects.remove_folder",
+         "projects.set_primary",
+@@ -275,6 +276,38 @@ def test_update_and_archive(tmp_path):
+     assert all(p["id"] != pid or p["archived"] for p in payload["projects"])
+ 
+ 
++def test_rename_many_returns_authoritative_records_and_rejects_stale_batches(tmp_path):
++    first = _call("projects.create", {"name": "Alpha", "folders": [str(tmp_path / "alpha")]})["project"]
++    second = _call("projects.create", {"name": "Beta", "folders": [str(tmp_path / "beta")]})["project"]
++
++    renamed = _call(
++        "projects.rename_many",
++        {
++            "renames": [
++                {"id": first["id"], "expectedName": "Alpha", "newName": "Group · Alpha"},
++                {"id": second["id"], "expectedName": "Beta", "newName": "Group · Beta"},
++            ]
++        },
++    )
++    assert [(project["id"], project["name"]) for project in renamed["projects"]] == [
++        (first["id"], "Group · Alpha"),
++        (second["id"], "Group · Beta"),
++    ]
++
++    response = server._methods["projects.rename_many"](
++        1,
++        {
++            "renames": [
++                {"id": first["id"], "expectedName": "Alpha", "newName": "Wrong"},
++                {"id": second["id"], "expectedName": "Group · Beta", "newName": "Also wrong"},
++            ]
++        },
++    )
++    assert response["error"]["code"] == 5063
++    assert _call("projects.get", {"id": first["id"]})["project"]["name"] == "Group · Alpha"
++    assert _call("projects.get", {"id": second["id"]})["project"]["name"] == "Group · Beta"
++
++
+ def test_get_unknown_returns_error():
+     resp = server._methods["projects.get"](1, {"id": "nope"})
+     assert "error" in resp
+@@ -821,4 +854,3 @@ def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_pat
+     assert not (coder_home / "projects.db").exists()
+     assert not (Path(os.environ["HERMES_HOME"]) / "projects.db").exists()
+ 
+-
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index 63b382c7d..af8f05f33 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -12868,6 +12868,28 @@ def _(rid, params, pdb, conn) -> dict:
+     return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
+ 
+ 
++@_projects_method("projects.rename_many")
++def _(rid, params, pdb, conn) -> dict:
++    raw_renames = params.get("renames")
++    if not isinstance(raw_renames, list):
++        raise ValueError("renames must be a list")
++
++    renames = []
++    for raw in raw_renames:
++        if not isinstance(raw, dict):
++            raise ValueError("each project rename must be an object")
++        renames.append(
++            {
++                "id": raw.get("id"),
++                "expected_name": raw.get("expectedName"),
++                "new_name": raw.get("newName"),
++            }
++        )
++
++    projects = pdb.rename_many(conn, renames)
++    return _ok(rid, {"projects": [project.to_dict() for project in projects]})
++
++
+ @_projects_method("projects.add_folder")
+ def _(rid, params, pdb, conn) -> dict:
+     proj = _require_project(pdb, conn, params)
+-- 
+2.50.1 (Apple Git-155)
+

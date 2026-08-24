@@ -1,0 +1,1176 @@
+From 64459518314d97bbc92275fc2674fd53da432533 Mon Sep 17 00:00:00 2001
+From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 04:06:38 +0300
+Subject: [PATCH 12/15] fix(desktop): isolate project group deletion
+
+---
+ .../project-group-delete-dialog.test.tsx      |  77 ++++-
+ .../sidebar/project-group-delete-dialog.tsx   |  85 +++--
+ .../app/chat/sidebar/projects-presentation.ts |  58 +++-
+ apps/desktop/src/store/projects.test.ts       | 302 ++++++++++++++++--
+ apps/desktop/src/store/projects.ts            | 137 ++++++--
+ 5 files changed, 561 insertions(+), 98 deletions(-)
+
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+index c1d13a1e7..1b11e1b2d 100644
+--- a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.test.tsx
+@@ -37,9 +37,15 @@ vi.mock('@/i18n', () => ({
+ }))
+ 
+ vi.mock('@/store/projects', () => ({
+-  refreshProjectTree: vi.fn().mockResolvedValue(undefined),
+-  refreshProjects: vi.fn().mockResolvedValue(undefined),
+-  renameProjectsMany: vi.fn().mockResolvedValue([])
++  withActiveProjectsContext: vi.fn(
++    (
++      operation: (operations: { reconcile: () => Promise<void>; renameMany: () => Promise<never[]> }) => Promise<void>
++    ) =>
++      operation({
++        reconcile: vi.fn().mockResolvedValue(undefined),
++        renameMany: vi.fn().mockResolvedValue([])
++      })
++  )
+ }))
+ 
+ const projects = [
+@@ -186,4 +192,69 @@ describe('ProjectGroupDeleteDialog', () => {
+     expect(checkbox.getAttribute('data-state')).toBe('checked')
+     expect(screen.getByRole('group', { name: 'Project rename preview' })).toBeTruthy()
+   })
++
++  it('resets the review and operation identity when the live label or exact member set changes', async () => {
++    let liveGroup = { id: 'work', label: 'CUE++', projectIds: ['p_alpha'] }
++    const deleteGroup = vi.fn().mockRejectedValueOnce(new Error('retry review')).mockResolvedValue(undefined)
++
++    const contribution = {
++      deleteGroup,
++      getSnapshot: () => ({ groups: [liveGroup] }),
++      subscribe: () => () => undefined
++    } satisfies ProjectsGroupingContribution
++
++    const onOpenChange = vi.fn()
++
++    const { rerender } = render(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={liveGroup}
++        onOpenChange={onOpenChange}
++        open
++        projects={projects}
++      />
++    )
++
++    fireEvent.click(screen.getByRole('checkbox'))
++    fireEvent.click(screen.getByRole('button', { name: 'Delete group' }))
++    expect((await screen.findByRole('alert')).textContent).toContain('retry review')
++    const firstOperationId = deleteGroup.mock.calls[0][0].operationId
++
++    liveGroup = { ...liveGroup, label: 'Renamed group' }
++    rerender(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={liveGroup}
++        onOpenChange={onOpenChange}
++        open
++        projects={projects}
++      />
++    )
++
++    await waitFor(() => expect(screen.getByRole('checkbox').getAttribute('data-state')).toBe('unchecked'))
++    expect(screen.queryByRole('group', { name: 'Project rename preview' })).toBeNull()
++
++    fireEvent.click(screen.getByRole('checkbox'))
++    liveGroup = { ...liveGroup, projectIds: ['p_alpha', 'p_beta'] }
++    rerender(
++      <ProjectGroupDeleteDialog
++        contribution={contribution}
++        group={liveGroup}
++        onOpenChange={onOpenChange}
++        open
++        projects={projects}
++      />
++    )
++
++    await waitFor(() => expect(screen.getByRole('checkbox').getAttribute('data-state')).toBe('unchecked'))
++    expect(screen.queryByRole('group', { name: 'Project rename preview' })).toBeNull()
++    fireEvent.click(screen.getByRole('button', { name: 'Delete group' }))
++
++    await waitFor(() => expect(deleteGroup).toHaveBeenCalledTimes(2))
++    expect(deleteGroup.mock.calls[1][0]).toMatchObject({
++      expectedProjectIds: ['p_alpha', 'p_beta'],
++      groupId: 'work'
++    })
++    expect(deleteGroup.mock.calls[1][0].operationId).not.toBe(firstOperationId)
++  })
+ })
+diff --git a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+index 4fbf36a43..284d7c7ac 100644
+--- a/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-group-delete-dialog.tsx
+@@ -13,7 +13,7 @@ import {
+ } from '@/components/ui/dialog'
+ import { ErrorBanner } from '@/components/ui/error-state'
+ import { useI18n } from '@/i18n'
+-import { refreshProjects, refreshProjectTree, renameProjectsMany } from '@/store/projects'
++import { withActiveProjectsContext } from '@/store/projects'
+ 
+ import {
+   buildProjectGroupRenamePlan,
+@@ -32,6 +32,28 @@ function uniqueMemberIds(group: ProjectGroupDescriptor): string[] {
+   return [...new Set(group.projectIds.map(id => id.trim()).filter(Boolean))]
+ }
+ 
++function reviewKey(group: ProjectGroupDescriptor): string {
++  return JSON.stringify([group.id, group.label, uniqueMemberIds(group).sort()])
++}
++
++interface ProjectGroupDeleteReview {
++  readonly group: ProjectGroupDescriptor
++  readonly key: string
++  readonly operationId: string
++}
++
++function createReview(group: ProjectGroupDescriptor): ProjectGroupDeleteReview {
++  const frozenGroup = { ...group, projectIds: [...group.projectIds] }
++
++  return { group: frozenGroup, key: reviewKey(frozenGroup), operationId: createOperationId() }
++}
++
++function createReviewFromKey(key: string): ProjectGroupDeleteReview {
++  const [id, label, projectIds] = JSON.parse(key) as [string, string, string[]]
++
++  return createReview({ id, label, projectIds })
++}
++
+ export function ProjectGroupDeleteDialog({
+   contribution,
+   group,
+@@ -50,9 +72,11 @@ export function ProjectGroupDeleteDialog({
+   const [prependGroupName, setPrependGroupName] = useState(false)
+   const [pending, setPending] = useState(false)
+   const [error, setError] = useState<string | null>(null)
+-  const [operationId, setOperationId] = useState(createOperationId)
++  const [review, setReview] = useState(() => createReview(group))
+   const deleteButtonRef = useRef<HTMLButtonElement>(null)
+-  const memberIds = useMemo(() => uniqueMemberIds(group), [group])
++  const liveReviewKey = reviewKey(group)
++  const reviewChanged = review.key !== liveReviewKey
++  const memberIds = useMemo(() => uniqueMemberIds(review.group), [review.group])
+   const projectsById = useMemo(() => new Map(projects.map(project => [project.id, project])), [projects])
+   const memberProjects = memberIds.map(id => projectsById.get(id)).filter(Boolean) as ProjectGroupDeleteProject[]
+   const missingMember = memberProjects.length !== memberIds.length
+@@ -63,17 +87,19 @@ export function ProjectGroupDeleteDialog({
+     }
+ 
+     try {
+-      return buildProjectGroupRenamePlan(group, projects)
++      return buildProjectGroupRenamePlan(review.group, projects)
+     } catch (reason) {
+       return reason
+     }
+-  }, [group, missingMember, prependGroupName, projects])
++  }, [missingMember, prependGroupName, projects, review.group])
+ 
+-  const validationError = missingMember
+-    ? new ProjectGroupDeleteValidationError('stale', 'A Project is missing from the deletion review')
+-    : renamePlan instanceof ProjectGroupDeleteValidationError
+-      ? renamePlan
+-      : null
++  const validationError = reviewChanged
++    ? new ProjectGroupDeleteValidationError('stale', 'The Project group changed since the deletion review')
++    : missingMember
++      ? new ProjectGroupDeleteValidationError('stale', 'A Project is missing from the deletion review')
++      : renamePlan instanceof ProjectGroupDeleteValidationError
++        ? renamePlan
++        : null
+ 
+   useEffect(() => {
+     if (!open) {
+@@ -81,10 +107,15 @@ export function ProjectGroupDeleteDialog({
+     }
+ 
+     setPrependGroupName(false)
+-    setPending(false)
+     setError(null)
+-    setOperationId(createOperationId())
+-  }, [open, group.id])
++    setReview(createReviewFromKey(liveReviewKey))
++  }, [liveReviewKey, open])
++
++  useEffect(() => {
++    if (open) {
++      setPending(false)
++    }
++  }, [open])
+ 
+   const errorMessage = (reason: unknown): string => {
+     if (reason instanceof ProjectGroupDeleteCompensationError) {
+@@ -99,17 +130,17 @@ export function ProjectGroupDeleteDialog({
+   }
+ 
+   const performDelete = async (prepend: boolean) => {
+-    await deleteProjectGroup({
+-      contribution,
+-      group,
+-      operationId,
+-      prependGroupName: prepend,
+-      projects,
+-      reconcile: async () => {
+-        await Promise.all([refreshProjects(), refreshProjectTree()])
+-      },
+-      renameMany: renameProjectsMany
+-    })
++    await withActiveProjectsContext(({ reconcile, renameMany }) =>
++      deleteProjectGroup({
++        contribution,
++        group: review.group,
++        operationId: review.operationId,
++        prependGroupName: prepend,
++        projects,
++        reconcile,
++        renameMany
++      })
++    )
+   }
+ 
+   if (memberIds.length === 0) {
+@@ -127,7 +158,7 @@ export function ProjectGroupDeleteDialog({
+           }
+         }}
+         open={open}
+-        title={p.deleteGroupTitle(group.label.trim())}
++        title={p.deleteGroupTitle(review.group.label.trim())}
+       />
+     )
+   }
+@@ -166,7 +197,7 @@ export function ProjectGroupDeleteDialog({
+         }}
+       >
+         <DialogHeader>
+-          <DialogTitle>{p.deleteGroupTitle(group.label.trim())}</DialogTitle>
++          <DialogTitle>{p.deleteGroupTitle(review.group.label.trim())}</DialogTitle>
+           <DialogDescription>{p.deleteGroupMoveDescription}</DialogDescription>
+         </DialogHeader>
+ 
+@@ -187,7 +218,7 @@ export function ProjectGroupDeleteDialog({
+               </h3>
+               <ul aria-label={p.deleteGroupPreviewBefore} className="text-sm" role="tree">
+                 <li aria-expanded="true" role="treeitem">
+-                  <span className="font-medium">{group.label.trim()}</span>
++                  <span className="font-medium">{review.group.label.trim()}</span>
+                   <ul className="ml-4 mt-1 grid gap-1" role="group">
+                     {memberProjects.map(project => (
+                       <li key={project.id} role="treeitem">
+diff --git a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+index 883ffed29..250b3df07 100644
+--- a/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
++++ b/apps/desktop/src/app/chat/sidebar/projects-presentation.ts
+@@ -60,9 +60,12 @@ function sanitizeSnapshot(value: unknown): ProjectsGroupingSnapshot | null {
+   const groups: ProjectGroupDescriptor[] = []
+ 
+   for (const raw of (value as { groups: readonly unknown[] }).groups) {
+-    if (!raw || typeof raw !== 'object') return null
++    if (!raw || typeof raw !== 'object') {
++      return null
++    }
+ 
+     const group = raw as Partial<ProjectGroupDescriptor>
++
+     if (
+       typeof group.id !== 'string' ||
+       !group.id.trim() ||
+@@ -94,10 +97,14 @@ function readValidProvider(): {
+ } | null {
+   for (const entry of registry.getArea(PROJECTS_GROUPING_AREA)) {
+     const contribution = entry.data as Partial<ProjectsGroupingContribution> | undefined
+-    if (typeof contribution?.getSnapshot !== 'function' || typeof contribution.subscribe !== 'function') continue
++
++    if (typeof contribution?.getSnapshot !== 'function' || typeof contribution.subscribe !== 'function') {
++      continue
++    }
+ 
+     try {
+       const snapshot = sanitizeSnapshot(contribution.getSnapshot())
++
+       if (snapshot) {
+         return { contribution: contribution as ProjectsGroupingContribution, snapshot }
+       }
+@@ -105,11 +112,13 @@ function readValidProvider(): {
+       // A malformed provider must not suppress a valid lower-priority provider.
+     }
+   }
++
+   return null
+ }
+ 
+ export function resolveProjectsGrouping(projects: readonly SidebarProjectTree[]): PresentedProjectsGrouping | null {
+   const active = readValidProvider()
++
+   return active ? resolveProjectsGroupingFrom(active.contribution, active.snapshot, projects) : null
+ }
+ 
+@@ -128,19 +137,35 @@ function resolveProjectsGroupingFrom(
+   for (const raw of snapshot.groups) {
+     const id = typeof raw?.id === 'string' ? raw.id.trim() : ''
+     const label = typeof raw?.label === 'string' ? raw.label.trim() : ''
+-    if (!id || !label || groupIds.has(id) || !Array.isArray(raw?.projectIds)) continue
++
++    if (!id || !label || groupIds.has(id) || !Array.isArray(raw?.projectIds)) {
++      continue
++    }
+ 
+     groupIds.add(id)
+     const groupProjects: SidebarProjectTree[] = []
++
+     for (const rawProjectId of raw.projectIds) {
+-      if (typeof rawProjectId !== 'string') continue
++      if (typeof rawProjectId !== 'string') {
++        continue
++      }
++
+       const projectId = rawProjectId.trim()
+-      if (!projectId || claimed.has(projectId)) continue
++
++      if (!projectId || claimed.has(projectId)) {
++        continue
++      }
++
+       const project = byId.get(projectId)
+-      if (!project) continue
++
++      if (!project) {
++        continue
++      }
++
+       claimed.add(projectId)
+       groupProjects.push(project)
+     }
++
+     groups.push({ collapsed: raw.collapsed === true, id, label, projects: groupProjects })
+   }
+ 
+@@ -157,7 +182,10 @@ const EMPTY_SUBSCRIBE = () => () => undefined
+ const NULL_SNAPSHOT = () => null
+ 
+ function snapshotsEqual(left: ProjectsGroupingSnapshot, right: ProjectsGroupingSnapshot): boolean {
+-  if (left === right) return true
++  if (left === right) {
++    return true
++  }
++
+   if (
+     left.revision !== right.revision ||
+     !Array.isArray(left.groups) ||
+@@ -169,12 +197,17 @@ function snapshotsEqual(left: ProjectsGroupingSnapshot, right: ProjectsGroupingS
+ 
+   const leftGroups = left.groups as readonly ProjectGroupDescriptor[]
+   const rightGroups = right.groups as readonly ProjectGroupDescriptor[]
++
+   return leftGroups.every((group, index) => {
+     const other = rightGroups[index]
+-    if (!group || !other || !Array.isArray(group.projectIds) || !Array.isArray(other.projectIds)) return false
++
++    if (!group || !other || !Array.isArray(group.projectIds) || !Array.isArray(other.projectIds)) {
++      return false
++    }
+ 
+     const projectIds = group.projectIds as readonly string[]
+     const otherProjectIds = other.projectIds as readonly string[]
++
+     return (
+       group.id === other.id &&
+       group.label === other.label &&
+@@ -198,8 +231,12 @@ function createStoreAdapter(contribution: ProjectsGroupingContribution, initialS
+         // Keep the last safe value if an accepted provider later misbehaves.
+       }
+ 
+-      if (!snapshot || snapshotsEqual(cachedSnapshot, snapshot)) return cachedSnapshot
++      if (!snapshot || snapshotsEqual(cachedSnapshot, snapshot)) {
++        return cachedSnapshot
++      }
++
+       cachedSnapshot = snapshot
++
+       return snapshot
+     },
+     subscribe: (listener: () => void) => contribution.subscribe(listener)
+@@ -210,10 +247,12 @@ function useProjectsGroupingStore() {
+   useContributions(PROJECTS_GROUPING_AREA)
+   const active = readValidProvider()
+   const contribution = active?.contribution ?? null
++
+   const store = useMemo(
+     () => (contribution && active ? createStoreAdapter(contribution, active.snapshot) : null),
+     [contribution]
+   )
++
+   const snapshot = useSyncExternalStore(
+     store?.subscribe ?? EMPTY_SUBSCRIBE,
+     store?.getSnapshot ?? NULL_SNAPSHOT,
+@@ -225,6 +264,7 @@ function useProjectsGroupingStore() {
+ 
+ export function useProjectsGrouping(projects: readonly SidebarProjectTree[]): PresentedProjectsGrouping | null {
+   const active = useProjectsGroupingStore()
++
+   return active ? resolveProjectsGroupingFrom(active.contribution, active.snapshot, projects) : null
+ }
+ 
+diff --git a/apps/desktop/src/store/projects.test.ts b/apps/desktop/src/store/projects.test.ts
+index 5a9c979a1..a604a53c1 100644
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -2,6 +2,7 @@ import { JsonRpcGatewayError } from '@hermes/shared'
+ import { atom } from 'nanostores'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
++import { deleteProjectGroup, ProjectGroupDeleteCompensationError } from '@/app/chat/sidebar/project-group-delete'
+ import {
+   PROJECTS_GROUPING_AREA,
+   type ProjectsGroupingContribution,
+@@ -42,7 +43,8 @@ import {
+   scanAndRecordRepos,
+   setProjectAppearance,
+   startWorkInRepo,
+-  tombstoneSessions
++  tombstoneSessions,
++  withActiveProjectsContext
+ } from './projects'
+ 
+ vi.mock('@/i18n', () => ({
+@@ -258,6 +260,158 @@ describe('transactional Project renaming', () => {
+     expect($projects.get()).toBe(beforeProjects)
+     expect($projectTree.get()).toBe(beforeTree)
+   })
++
++  it('treats missing projects.rename_many as method-specific on an older backend', async () => {
++    const created = { ...alpha, id: 'p_created', name: 'Created', slug: 'created' }
++
++    const request = vi.fn(async (method: string) => {
++      if (method === 'projects.rename_many') {
++        throw new Error('unknown method: projects.rename_many')
++      }
++
++      if (method === 'projects.create') {
++        return { project: created }
++      }
++
++      return { active_id: null, projects: [alpha, created], scoped_session_ids: [] }
++    })
++
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++    $projectsRpcAvailable.set(true)
++
++    await expect(
++      renameProjectsMany([{ expectedName: 'Alpha', id: alpha.id, newName: 'Group · Alpha' }])
++    ).rejects.toThrow('sidebar.projects.staleBackend')
++
++    expect($projectsRpcAvailable.get()).toBe(true)
++    await expect(createProject({ folders: [], name: 'Created' })).resolves.toEqual(created)
++    expect(request).toHaveBeenCalledWith('projects.create', expect.objectContaining({ name: 'Created' }))
++  })
++
++  it('keeps a delayed successful delete-group saga on gateway A without publishing into B', async () => {
++    const renamed = { ...alpha, name: 'Group · Alpha' }
++    const renameResponse = deferred<{ projects: (typeof alpha)[] }>()
++
++    const gatewayA = {
++      connectionState: 'open',
++      request: vi.fn((method: string, _params?: Record<string, unknown>) => {
++        if (method === 'projects.rename_many') {
++          return renameResponse.promise
++        }
++
++        throw new Error(`unexpected ${method}`)
++      })
++    }
++
++    const gatewayB = { connectionState: 'open', request: vi.fn() }
++    const deleteGroup = vi.fn().mockResolvedValue(undefined)
++    let current = gatewayA
++
++    activeGateway.mockImplementation(() => current as never)
++
++    const pending = withActiveProjectsContext(({ reconcile, renameMany }) =>
++      deleteProjectGroup({
++        contribution: {
++          deleteGroup,
++          getSnapshot: () => ({ groups: [{ id: 'group', label: 'Group', projectIds: [alpha.id] }] }),
++          subscribe: () => () => undefined
++        },
++        group: { id: 'group', label: 'Group', projectIds: [alpha.id] },
++        operationId: 'operation-a',
++        prependGroupName: true,
++        projects: [alpha],
++        reconcile,
++        renameMany
++      })
++    )
++
++    await vi.waitFor(() => expect(gatewayA.request).toHaveBeenCalledOnce())
++    current = gatewayB
++    $activeGatewayProfile.set('profile-b')
++    $projects.set([{ ...alpha, id: 'source-b', name: 'Source B' }])
++    $projectTree.set([{ id: 'source-b', label: 'Source B', path: '/b', repos: [], sessionCount: 0 }])
++    renameResponse.resolve({ projects: [renamed] })
++
++    await expect(pending).resolves.toBeUndefined()
++    expect(deleteGroup).toHaveBeenCalledOnce()
++    expect(gatewayA.request).toHaveBeenCalledWith('projects.rename_many', {
++      profile: 'default',
++      renames: [{ expectedName: 'Alpha', id: alpha.id, newName: 'Group · Alpha' }]
++    })
++    expect(gatewayB.request).not.toHaveBeenCalled()
++    expect($projects.get().map(project => project.id)).toEqual(['source-b'])
++    expect($projectTree.get().map(project => project.id)).toEqual(['source-b'])
++  })
++
++  it('keeps compensation and reconciliation on gateway A after switching to B', async () => {
++    const renamed = { ...alpha, name: 'Group · Alpha' }
++    const renameResponse = deferred<{ projects: (typeof alpha)[] }>()
++    const providerFailure = new Error('provider unavailable')
++    const rollbackFailure = new Error('rollback failed')
++
++    const gatewayA = {
++      connectionState: 'open',
++      request: vi.fn((method: string, _params?: Record<string, unknown>) => {
++        if (method === 'projects.rename_many' && gatewayA.request.mock.calls.length === 1) {
++          return renameResponse.promise
++        }
++
++        if (method === 'projects.rename_many') {
++          return Promise.reject(rollbackFailure)
++        }
++
++        if (method === 'projects.list') {
++          return Promise.resolve({ active_id: null, projects: [alpha] })
++        }
++
++        if (method === 'projects.tree') {
++          return Promise.resolve({ active_id: null, projects: [], scoped_session_ids: [] })
++        }
++
++        throw new Error(`unexpected ${method}`)
++      })
++    }
++
++    const gatewayB = { connectionState: 'open', request: vi.fn() }
++    let current = gatewayA
++
++    activeGateway.mockImplementation(() => current as never)
++
++    const pending = withActiveProjectsContext(({ reconcile, renameMany }) =>
++      deleteProjectGroup({
++        contribution: {
++          deleteGroup: vi.fn().mockRejectedValue(providerFailure),
++          getSnapshot: () => ({ groups: [{ id: 'group', label: 'Group', projectIds: [alpha.id] }] }),
++          subscribe: () => () => undefined
++        },
++        group: { id: 'group', label: 'Group', projectIds: [alpha.id] },
++        operationId: 'operation-a',
++        prependGroupName: true,
++        projects: [alpha],
++        reconcile,
++        renameMany
++      })
++    )
++
++    await vi.waitFor(() => expect(gatewayA.request).toHaveBeenCalledOnce())
++    current = gatewayB
++    $activeGatewayProfile.set('profile-b')
++    $projects.set([{ ...alpha, id: 'source-b', name: 'Source B' }])
++    $projectTree.set([{ id: 'source-b', label: 'Source B', path: '/b', repos: [], sessionCount: 0 }])
++    renameResponse.resolve({ projects: [renamed] })
++
++    await expect(pending).rejects.toBeInstanceOf(ProjectGroupDeleteCompensationError)
++    expect(gatewayA.request.mock.calls.map(([method]) => method)).toEqual([
++      'projects.rename_many',
++      'projects.rename_many',
++      'projects.list',
++      'projects.tree'
++    ])
++    expect(gatewayA.request.mock.calls.every(([, params]) => params?.profile === 'default')).toBe(true)
++    expect(gatewayB.request).not.toHaveBeenCalled()
++    expect($projects.get().map(project => project.id)).toEqual(['source-b'])
++    expect($projectTree.get().map(project => project.id)).toEqual(['source-b'])
++  })
+ })
+ 
+ describe('resolveNewSessionCwd', () => {
+@@ -539,18 +693,34 @@ describe('createProject', () => {
+       primary_path: '/repo',
+       slug: 'repo'
+     }
++
+     let listCalls = 0
++
+     const request = vi.fn(async (method: string) => {
+-      if (method === 'projects.create') return { project: created }
+-      if (method === 'projects.get' || method === 'projects.update') return { project: created }
+-      if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      if (method === 'projects.create') {
++        return { project: created }
++      }
++
++      if (method === 'projects.get' || method === 'projects.update') {
++        return { project: created }
++      }
++
++      if (method === 'projects.tree') {
++        return { active_id: null, projects: [], scoped_session_ids: [] }
++      }
+       listCalls += 1
+-      if (listCalls === 1) return { active_id: null, projects: [], scoped_session_ids: [] }
++
++      if (listCalls === 1) {
++        return { active_id: null, projects: [], scoped_session_ids: [] }
++      }
++
+       return { active_id: null, projects: [created], scoped_session_ids: [] }
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+     $projects.set([])
+     $projectTree.set([])
++
+     const autoProject = {
+       color: null,
+       icon: null,
+@@ -559,10 +729,14 @@ describe('createProject', () => {
+       label: 'repo',
+       path: '/repo'
+     } as const
++
+     const membership: string[] = []
+ 
+     const adopted = await materializeAutoProject(autoProject)
+-    if (adopted) membership.push(adopted.id)
++
++    if (adopted) {
++      membership.push(adopted.id)
++    }
+     await setProjectAppearance(autoProject, { color: '#123456' })
+ 
+     expect(membership).toEqual(['p_stable'])
+@@ -583,6 +757,7 @@ describe('materializeAutoProject authority', () => {
+     label: 'repo',
+     path: '/repo'
+   } as const
++
+   const listed = {
+     archived: false,
+     board_slug: null,
+@@ -596,6 +771,7 @@ describe('materializeAutoProject authority', () => {
+     primary_path: '/repo',
+     slug: 'repo'
+   }
++
+   const authoritative = { ...listed, name: 'Authoritative' }
+ 
+   beforeEach(() => {
+@@ -610,10 +786,16 @@ describe('materializeAutoProject authority', () => {
+ 
+   it('resolves a stable row through authoritative list/get when the renderer cache is stale', async () => {
+     const request = vi.fn(async (method: string) => {
+-      if (method === 'projects.list') return { active_id: null, projects: [listed] }
+-      if (method === 'projects.get') return { project: authoritative }
++      if (method === 'projects.list') {
++        return { active_id: null, projects: [listed] }
++      }
++
++      if (method === 'projects.get') {
++        return { project: authoritative }
++      }
+       throw new Error(`must not call ${method}`)
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+ 
+     await expect(materializeAutoProject(autoProject)).resolves.toEqual(authoritative)
+@@ -636,13 +818,26 @@ describe('materializeAutoProject authority', () => {
+     }
+   ])('keeps an entered auto Project open when $label adopts it', async ({ adopt }) => {
+     const patched = { ...authoritative, color: '#123456' }
++
+     const request = vi.fn(async (method: string) => {
+-      if (method === 'projects.list') return { active_id: null, projects: [listed] }
+-      if (method === 'projects.get') return { project: authoritative }
+-      if (method === 'projects.update') return { project: patched }
+-      if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      if (method === 'projects.list') {
++        return { active_id: null, projects: [listed] }
++      }
++
++      if (method === 'projects.get') {
++        return { project: authoritative }
++      }
++
++      if (method === 'projects.update') {
++        return { project: patched }
++      }
++
++      if (method === 'projects.tree') {
++        return { active_id: null, projects: [], scoped_session_ids: [] }
++      }
+       throw new Error(`unexpected ${method}`)
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+     $projectTree.set([
+       {
+@@ -667,11 +862,20 @@ describe('materializeAutoProject authority', () => {
+     { label: 'no Project', scope: null }
+   ])('preserves $label scope when an auto Project is adopted', async ({ scope }) => {
+     const request = vi.fn(async (method: string) => {
+-      if (method === 'projects.list') return { active_id: null, projects: [listed] }
+-      if (method === 'projects.get') return { project: authoritative }
+-      if (method === 'projects.tree') return { active_id: null, projects: [], scoped_session_ids: [] }
++      if (method === 'projects.list') {
++        return { active_id: null, projects: [listed] }
++      }
++
++      if (method === 'projects.get') {
++        return { project: authoritative }
++      }
++
++      if (method === 'projects.tree') {
++        return { active_id: null, projects: [], scoped_session_ids: [] }
++      }
+       throw new Error(`unexpected ${method}`)
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+     $projectTree.set([
+       {
+@@ -693,6 +897,7 @@ describe('materializeAutoProject authority', () => {
+ 
+   it('immediately replaces the transient tree node so the adopted appearance is visible in its target group', async () => {
+     const previewSession = { cwd: '/repo', id: 'session-1', title: 'Current work' }
++
+     const transientTree = {
+       color: null,
+       icon: 'repo',
+@@ -714,20 +919,33 @@ describe('materializeAutoProject authority', () => {
+       sessionCount: 1,
+       totalTokens: 99
+     } as SidebarProjectTree
++
+     const patched = { ...authoritative, color: '#123456', icon: 'rocket' }
+     const listRefresh = deferred<{ active_id: null; projects: (typeof patched)[] }>()
+     const treeRefresh = deferred<{ active_id: null; projects: SidebarProjectTree[]; scoped_session_ids: string[] }>()
+     let listCalls = 0
++
+     const request = vi.fn((method: string) => {
+       if (method === 'projects.list') {
+         listCalls += 1
++
+         return listCalls === 1 ? Promise.resolve({ active_id: null, projects: [] }) : listRefresh.promise
+       }
+-      if (method === 'projects.create') return Promise.resolve({ project: authoritative })
+-      if (method === 'projects.update') return Promise.resolve({ project: patched })
+-      if (method === 'projects.tree') return treeRefresh.promise
++
++      if (method === 'projects.create') {
++        return Promise.resolve({ project: authoritative })
++      }
++
++      if (method === 'projects.update') {
++        return Promise.resolve({ project: patched })
++      }
++
++      if (method === 'projects.tree') {
++        return treeRefresh.promise
++      }
+       throw new Error(`unexpected ${method}`)
+     })
++
+     const gateway = { connectionState: 'open', request }
+     activeGateway.mockReturnValue(gateway as never)
+     $projectTree.set([transientTree])
+@@ -736,6 +954,7 @@ describe('materializeAutoProject authority', () => {
+       getSnapshot: () => ({ groups: [{ id: 'target', label: 'Target', projectIds: ['p_stable'] }] }),
+       subscribe: () => () => undefined
+     }
++
+     const dispose = registry.register({ area: PROJECTS_GROUPING_AREA, data: contribution, id: 'materialize-target' })
+ 
+     try {
+@@ -770,11 +989,18 @@ describe('materializeAutoProject authority', () => {
+ 
+   it('coalesces concurrent stale-cache materialization onto one authoritative row', async () => {
+     const listing = deferred<{ active_id: null; projects: (typeof listed)[] }>()
++
+     const request = vi.fn((method: string) => {
+-      if (method === 'projects.list') return listing.promise
+-      if (method === 'projects.get') return Promise.resolve({ project: authoritative })
++      if (method === 'projects.list') {
++        return listing.promise
++      }
++
++      if (method === 'projects.get') {
++        return Promise.resolve({ project: authoritative })
++      }
+       throw new Error(`must not call ${method}`)
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+ 
+     const first = materializeAutoProject(autoProject)
+@@ -789,19 +1015,29 @@ describe('materializeAutoProject authority', () => {
+ 
+   it('reconciles one duplicate-primary create race through list/get instead of failing', async () => {
+     let listCalls = 0
++
+     const duplicate = new JsonRpcGatewayError(
+       "folder already belongs to project 'repo' (p_stable); switch to it instead of creating a duplicate",
+       { code: 5063 }
+     )
++
+     const request = vi.fn(async (method: string) => {
+       if (method === 'projects.list') {
+         listCalls += 1
++
+         return { active_id: null, projects: listCalls === 1 ? [] : [listed] }
+       }
+-      if (method === 'projects.create') throw duplicate
+-      if (method === 'projects.get') return { project: authoritative }
++
++      if (method === 'projects.create') {
++        throw duplicate
++      }
++
++      if (method === 'projects.get') {
++        return { project: authoritative }
++      }
+       throw new Error(`unexpected ${method}`)
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+ 
+     await expect(materializeAutoProject(autoProject)).resolves.toEqual(authoritative)
+@@ -816,11 +1052,18 @@ describe('materializeAutoProject authority', () => {
+       "folder already belongs to project 'repo' (p_missing); switch to it instead of creating a duplicate",
+       { code: 5063 }
+     )
++
+     const request = vi.fn(async (method: string) => {
+-      if (method === 'projects.list') return { active_id: null, projects: [] }
+-      if (method === 'projects.create') throw duplicate
++      if (method === 'projects.list') {
++        return { active_id: null, projects: [] }
++      }
++
++      if (method === 'projects.create') {
++        throw duplicate
++      }
+       throw new Error(`unexpected ${method}`)
+     })
++
+     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+ 
+     await expect(materializeAutoProject(autoProject)).rejects.toBe(duplicate)
+@@ -830,14 +1073,21 @@ describe('materializeAutoProject authority', () => {
+ 
+   it('does not let a late successful gateway A materialization change gateway B controls or caches', async () => {
+     const listing = deferred<{ active_id: null; projects: (typeof listed)[] }>()
++
+     const gatewayA = {
+       connectionState: 'open',
+       request: vi.fn((method: string) => {
+-        if (method === 'projects.list') return listing.promise
+-        if (method === 'projects.get') return Promise.resolve({ project: authoritative })
++        if (method === 'projects.list') {
++          return listing.promise
++        }
++
++        if (method === 'projects.get') {
++          return Promise.resolve({ project: authoritative })
++        }
+         throw new Error(`unexpected ${method}`)
+       })
+     }
++
+     const gatewayB = { connectionState: 'open', request: vi.fn() }
+     let current = gatewayA
+     activeGateway.mockImplementation(() => current as never)
+diff --git a/apps/desktop/src/store/projects.ts b/apps/desktop/src/store/projects.ts
+index 4fd6bdbed..919790c99 100644
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -886,11 +886,30 @@ const reconcileProjects = (): void => {
+   void refreshProjectTree()
+ }
+ 
+-const reconcileProjectsOn = (context: ActiveProjectsContext): void => {
+-  if (!stillOnProjectsContext(context)) return
++async function reconcileProjectsOn(context: ActiveProjectsContext, reportErrors = false): Promise<void> {
++  if (stillOnProjectsContext(context)) {
++    await Promise.all([refreshProjectsOn(context), refreshProjectTreeOn(context)])
+ 
+-  void refreshProjectsOn(context)
+-  void refreshProjectTreeOn(context)
++    return
++  }
++
++  // A transaction may finish after the foreground moved elsewhere. Reconcile
++  // the authority it mutated without advancing foreground generations or
++  // publishing that old source into the new source's caches.
++  const requests = [
++    gatewayRequestOn<ProjectsPayload>(context.gateway, 'projects.list', projectParams({}, context.profile)),
++    gatewayRequestOn<ProjectTreePayload>(
++      context.gateway,
++      'projects.tree',
++      projectParams({ preview_limit: PROJECT_TREE_PREVIEW_LIMIT }, context.profile)
++    )
++  ]
++
++  if (reportErrors) {
++    await Promise.all(requests)
++  } else {
++    await Promise.allSettled(requests)
++  }
+ }
+ 
+ // Map a ProjectInfo (list shape) onto a minimal overview tree node so a created
+@@ -988,21 +1007,19 @@ export interface ProjectNameCAS {
+ // The backend validates the whole CAS batch and returns every authoritative
+ // Project record. Renderer caches publish only after that complete response is
+ // validated, so a rejected batch cannot paint a partial rename.
+-export async function renameProjectsMany(renames: readonly ProjectNameCAS[]): Promise<ProjectInfo[]> {
+-  if ($projectsRpcAvailable.get() === false) {
+-    throw projectsStaleBackendError()
+-  }
+-
++async function renameProjectsManyOn(
++  context: ActiveProjectsContext,
++  renames: readonly ProjectNameCAS[]
++): Promise<ProjectInfo[]> {
+   let response: { projects: ProjectInfo[] }
+ 
+   try {
+-    response = await gatewayRequest<{ projects: ProjectInfo[] }>(
++    response = await gatewayRequestOn<{ projects: ProjectInfo[] }>(
++      context.gateway,
+       'projects.rename_many',
+-      projectParams({ renames: [...renames] })
++      projectParams({ renames: [...renames] }, context.profile)
+     )
+   } catch (error) {
+-    markProjectsRpcFailure(error)
+-
+     if (isMissingRpcMethod(error)) {
+       throw projectsStaleBackendError()
+     }
+@@ -1019,27 +1036,54 @@ export async function renameProjectsMany(renames: readonly ProjectNameCAS[]): Pr
+     returnedIds.size !== requestedIds.size ||
+     [...requestedIds].some(id => !returnedIds.has(id))
+   ) {
+-    reconcileProjects()
++    void reconcileProjectsOn(context)
+     throw new Error('projects.rename_many returned an incomplete Project set')
+   }
+ 
+-  const byId = new Map(response.projects.map(project => [project.id, project]))
+-  batch(() => {
+-    $projects.set($projects.get().map(project => byId.get(project.id) ?? project))
+-    $projectTree.set(
+-      $projectTree.get().map(project => {
+-        const renamed = byId.get(project.id)
+-
+-        return renamed ? { ...project, label: renamed.name } : project
+-      })
+-    )
+-  })
++  if (stillOnProjectsContext(context)) {
++    const byId = new Map(response.projects.map(project => [project.id, project]))
++    batch(() => {
++      $projects.set($projects.get().map(project => byId.get(project.id) ?? project))
++      $projectTree.set(
++        $projectTree.get().map(project => {
++          const renamed = byId.get(project.id)
++
++          return renamed ? { ...project, label: renamed.name } : project
++        })
++      )
++    })
+ 
+-  markProjectsRpcSuccess()
++    markProjectsRpcSuccess()
++  }
+ 
+   return response.projects
+ }
+ 
++export async function renameProjectsMany(renames: readonly ProjectNameCAS[]): Promise<ProjectInfo[]> {
++  if ($projectsRpcAvailable.get() === false) {
++    throw projectsStaleBackendError()
++  }
++
++  return renameProjectsManyOn(await activeProjectsContext(), renames)
++}
++
++export interface ActiveProjectsOperations {
++  readonly reconcile: () => Promise<void>
++  readonly renameMany: (renames: readonly ProjectNameCAS[]) => Promise<ProjectInfo[]>
++}
++
++/** Keep every leg of a cross-authority operation on one gateway/profile pair. */
++export async function withActiveProjectsContext<T>(
++  operation: (operations: ActiveProjectsOperations) => Promise<T>
++): Promise<T> {
++  const context = await activeProjectsContext()
++
++  return operation({
++    reconcile: () => reconcileProjectsOn(context, true),
++    renameMany: renames => renameProjectsManyOn(context, renames)
++  })
++}
++
+ // Patch top-level project fields (name / appearance). Optimistic: the cached
+ // tree + list update instantly so a color/icon/name change has no round-trip
+ // lag; only a failed write reconciles from the server.
+@@ -1114,12 +1158,16 @@ async function authoritativeProjectForPath(context: ActiveProjectsContext, path:
+     'projects.list',
+     projectParams({}, context.profile)
+   )
++
+   if (stillOnProjectsContext(context)) {
+     markProjectsRpcSuccess()
+   }
++
+   const listed = findProjectByPath(payload.projects ?? [], path)
+ 
+-  if (!listed) return null
++  if (!listed) {
++    return null
++  }
+ 
+   const { project } = await gatewayRequestOn<{ project: ProjectInfo | null }>(
+     context.gateway,
+@@ -1132,9 +1180,12 @@ async function authoritativeProjectForPath(context: ActiveProjectsContext, path:
+ 
+ function reconcileMaterializedProjectTree(source: AutoProjectIdentity, project: ProjectInfo): void {
+   const tree = $projectTree.get()
++
+   const transientMatches = (node: SidebarProjectTree): boolean =>
+     node.id === source.id || Boolean(node.isAuto && node.path && source.path && samePath(node.path, source.path))
++
+   const carried = tree.find(node => node.id === project.id) ?? tree.find(transientMatches)
++
+   const stable = carried
+     ? {
+         ...carried,
+@@ -1147,6 +1198,7 @@ function reconcileMaterializedProjectTree(source: AutoProjectIdentity, project:
+         path: project.primary_path ?? project.folders?.[0]?.path ?? null
+       }
+     : projectInfoToTreeNode(project)
++
+   const next: SidebarProjectTree[] = []
+   let inserted = false
+ 
+@@ -1175,7 +1227,9 @@ function cacheMaterializedProject(
+   source: AutoProjectIdentity,
+   project: ProjectInfo
+ ): void {
+-  if (!stillOnProjectsContext(context)) return
++  if (!stillOnProjectsContext(context)) {
++    return
++  }
+ 
+   const cached = $projects.get()
+   const index = cached.findIndex(candidate => candidate.id === project.id)
+@@ -1210,16 +1264,22 @@ async function createMaterializedProject(
+       if (stillOnProjectsContext(context)) {
+         $projectsRpcAvailable.set(false)
+       }
++
+       throw projectsStaleBackendError()
+     }
+ 
+-    if (!isDuplicatePrimaryProjectError(error)) throw error
++    if (!isDuplicatePrimaryProjectError(error)) {
++      throw error
++    }
+ 
+     // Another renderer/process won the create race after our first list.
+     // Reconcile once; if the row still is not visible, preserve the original
+     // rejection instead of looping or disguising an inconsistent backend.
+     const raced = await authoritativeProjectForPath(context, project.path!)
+-    if (!raced) throw error
++
++    if (!raced) {
++      throw error
++    }
+ 
+     return raced
+   }
+@@ -1227,6 +1287,7 @@ async function createMaterializedProject(
+   if (stillOnProjectsContext(context)) {
+     markProjectsRpcSuccess()
+   }
++
+   return response.project
+ }
+ 
+@@ -1236,12 +1297,14 @@ async function resolveMaterializedAutoProject(
+ ): Promise<ProjectInfo | null> {
+   try {
+     const existing = await authoritativeProjectForPath(context, project.path!)
++
+     return existing ?? createMaterializedProject(context, project)
+   } catch (error) {
+     if (isMissingRpcMethod(error)) {
+       if (stillOnProjectsContext(context)) {
+         $projectsRpcAvailable.set(false)
+       }
++
+       throw projectsStaleBackendError()
+     }
+ 
+@@ -1282,7 +1345,10 @@ export async function materializeAutoProject(
+   project: AutoProjectIdentity,
+   patch: ProjectAppearancePatch = {}
+ ): Promise<ProjectInfo | null> {
+-  if (!project.isAuto || !project.path) return null
++  if (!project.isAuto || !project.path) {
++    return null
++  }
++
+   const context = await activeProjectsContext()
+   const key = autoProjectMaterializationKey(context.profile, project.path)
+   let pendingByPath = materializingAutoProjects.get(context.gateway)
+@@ -1294,6 +1360,7 @@ export async function materializeAutoProject(
+ 
+   let pending = pendingByPath.get(key)
+   let ownsMaterialization = false
++
+   if (!pending) {
+     ownsMaterialization = true
+     pending = resolveMaterializedAutoProject(context, project).finally(() => {
+@@ -1303,9 +1370,13 @@ export async function materializeAutoProject(
+   }
+ 
+   let materialized = await pending
+-  if (!materialized) return null
++
++  if (!materialized) {
++    return null
++  }
+ 
+   cacheMaterializedProject(context, project, materialized)
++
+   if (stillOnProjectsContext(context)) {
+     setSidebarAgentsGrouped(true)
+   }
+@@ -1316,7 +1387,7 @@ export async function materializeAutoProject(
+   }
+ 
+   if (ownsMaterialization) {
+-    reconcileProjectsOn(context)
++    void reconcileProjectsOn(context)
+   }
+ 
+   return materialized
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,7 +1,7 @@
-From 43a93c2f60e9443282876d70b698bb2d012f20e3 Mon Sep 17 00:00:00 2001
+From c4c1c53599a80d23279ef56e6d37becd3f6d98c9 Mon Sep 17 00:00:00 2001
 From: Cristian Moldovan <1080881+crissmoldovan@users.noreply.github.com>
 Date: Mon, 24 Aug 2026 00:05:49 +0300
-Subject: [PATCH 1/9] feat(desktop): add Project presentation plugin area
+Subject: [PATCH 01/15] feat(desktop): add Project presentation plugin area
 
 ---
  .../sidebar/projects-presentation.test.ts     | 58 ++++++++++++++

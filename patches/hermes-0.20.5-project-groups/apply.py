@@ -11,7 +11,7 @@ BUNDLE = Path(__file__).resolve().parent
 BASE = (BUNDLE / "base-commit.txt").read_text().strip()
 SERIES = [line.strip() for line in (BUNDLE / "series").read_text().splitlines() if line.strip()]
 PLUGIN_REPO = "https://github.com/cueplusplus/hermes-plugin-project-groups.git"
-PLUGIN_REF = "40e068a4361889d4e46862c49d17ae177fc07d87"
+PLUGIN_REF = "0c58068"
 
 
 def run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
