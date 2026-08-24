@@ -3,7 +3,7 @@
   "label": "Project Groups",
   "description": "Authoritative profile-scoped persistence for native Hermes Project grouping.",
   "icon": "FolderTree",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "tab": {
     "path": "/project-groups-backend",
     "hidden": true

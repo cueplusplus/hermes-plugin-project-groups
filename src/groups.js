@@ -114,10 +114,13 @@ export function moveProject(state, groupId, projectId, delta) {
 
 export function deleteGroup(state, groupId) {
   const current = normalizeState(state)
+  const projectOrder = { ...current.projectOrder }
+  delete projectOrder[groupId]
   return {
     ...current,
     groups: current.groups.filter(group => group.id !== groupId),
-    assignments: Object.fromEntries(Object.entries(current.assignments).filter(([, id]) => id !== groupId))
+    assignments: Object.fromEntries(Object.entries(current.assignments).filter(([, id]) => id !== groupId)),
+    projectOrder
   }
 }
 

@@ -91,9 +91,125 @@ class ProjectGroupsApiTest(unittest.TestCase):
 
     def test_capabilities_advertise_all_native_grouping_mutations(self):
         self.assertEqual(asyncio.run(module.get_capabilities()), {
-            "mutations": ["createGroup", "assignProject", "setGroupCollapsed"],
+            "mutations": ["createGroup", "assignProject", "setGroupCollapsed", "deleteGroup"],
             "version": 1,
         })
+
+    def test_delete_group_uses_exact_member_cas_for_empty_and_nonempty_groups(self):
+        for members in ([], ["p1", "p2"]):
+            with self.subTest(members=members):
+                state = module.normalize_state({
+                    "groups": [
+                        {"id": "cue", "name": "CUE++"},
+                        {"id": "other", "name": "Other"},
+                    ],
+                    "assignments": {
+                        **{project_id: "cue" for project_id in members},
+                        "p-other": "other",
+                    },
+                    "projectOrder": {
+                        "cue": list(reversed(members)),
+                        "other": ["p-other"],
+                        "__ungrouped__": ["p-free"],
+                    },
+                })
+                module._atomic_write(module._state_path(), state)
+
+                deleted = asyncio.run(module.delete_group(module.DeleteGroupEnvelope(
+                    group_id="cue",
+                    expected_project_ids=list(reversed(members)),
+                    operation_id=f"delete-cue-{len(members)}",
+                )))
+
+                self.assertEqual(deleted["state"]["groups"], [
+                    {"id": "other", "name": "Other", "collapsed": False},
+                ])
+                self.assertEqual(deleted["state"]["assignments"], {"p-other": "other"})
+                self.assertEqual(deleted["state"]["projectOrder"], {
+                    "other": ["p-other"],
+                    "__ungrouped__": ["p-free"],
+                })
+                self.assertEqual(len(deleted["state"]["deleteOperations"]), 1)
+                self.assertEqual(module._read_state(), deleted["state"])
+
+    def test_delete_group_cas_mismatch_is_non_mutating(self):
+        state = module.normalize_state({
+            "groups": [{"id": "cue", "name": "CUE++"}],
+            "assignments": {"p1": "cue", "p2": "cue"},
+            "projectOrder": {"cue": ["p1", "p2"]},
+        })
+        module._atomic_write(module._state_path(), state)
+        original = module._state_path().read_bytes()
+
+        with self.assertRaises(module.HTTPException) as raised:
+            asyncio.run(module.delete_group(module.DeleteGroupEnvelope(
+                group_id="cue",
+                expected_project_ids=["p1"],
+                operation_id="delete-stale",
+            )))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("member set", raised.exception.detail)
+        self.assertEqual(module._state_path().read_bytes(), original)
+
+    def test_delete_group_response_retry_is_idempotent_after_backend_reload(self):
+        state = module.normalize_state({
+            "groups": [{"id": "cue", "name": "CUE++"}],
+            "assignments": {"p1": "cue"},
+            "projectOrder": {"cue": ["p1"]},
+        })
+        module._atomic_write(module._state_path(), state)
+        request = module.DeleteGroupEnvelope(
+            group_id="cue",
+            expected_project_ids=["p1"],
+            operation_id="delete-retry",
+        )
+        first = asyncio.run(module.delete_group(request))
+
+        reload_spec = importlib.util.spec_from_file_location("project_groups_api_reloaded", MODULE_PATH)
+        assert reload_spec is not None and reload_spec.loader is not None
+        reloaded = importlib.util.module_from_spec(reload_spec)
+        reload_spec.loader.exec_module(reloaded)
+        retried = asyncio.run(reloaded.delete_group(reloaded.DeleteGroupEnvelope(
+            group_id="cue",
+            expected_project_ids=["p1"],
+            operation_id="delete-retry",
+        )))
+
+        self.assertEqual(retried, first)
+        with self.assertRaises(reloaded.HTTPException) as reused:
+            asyncio.run(reloaded.delete_group(reloaded.DeleteGroupEnvelope(
+                group_id="cue",
+                expected_project_ids=[],
+                operation_id="delete-retry",
+            )))
+        self.assertEqual(reused.exception.status_code, 409)
+
+    def test_delete_operation_ledger_is_bounded(self):
+        state = module.normalize_state({
+            "groups": [
+                {"id": "one", "name": "One"},
+                {"id": "two", "name": "Two"},
+                {"id": "three", "name": "Three"},
+            ],
+        })
+        module._atomic_write(module._state_path(), state)
+        original_limit = module._MAX_DELETE_OPERATIONS
+        module._MAX_DELETE_OPERATIONS = 2
+        try:
+            for group_id in ("one", "two", "three"):
+                asyncio.run(module.delete_group(module.DeleteGroupEnvelope(
+                    group_id=group_id,
+                    expected_project_ids=[],
+                    operation_id=f"delete-{group_id}",
+                )))
+            persisted = module._read_state()
+            self.assertEqual(
+                [entry["operationId"] for entry in persisted["deleteOperations"]],
+                ["delete-two", "delete-three"],
+            )
+        finally:
+            module._MAX_DELETE_OPERATIONS = original_limit
 
     def test_create_group_rejects_case_insensitive_duplicate(self):
         asyncio.run(module.create_group(module.CreateGroupEnvelope(name="CUE++")))
@@ -197,6 +313,11 @@ class ProjectGroupsApiTest(unittest.TestCase):
                 group_id="cue",
                 collapsed=True,
             )),
+            "delete group": lambda: module.delete_group(module.DeleteGroupEnvelope(
+                group_id="cue",
+                expected_project_ids=["p1"],
+                operation_id="delete-newer-schema",
+            )),
         }
 
         for name, call in calls.items():
@@ -211,8 +332,10 @@ class ProjectGroupsApiTest(unittest.TestCase):
     def test_mutations_cannot_cross_persisted_collection_bounds(self):
         original_groups = module._MAX_GROUPS
         original_assignments = module._MAX_ASSIGNMENTS
+        original_delete_operations = module._MAX_DELETE_OPERATIONS
         module._MAX_GROUPS = 1
         module._MAX_ASSIGNMENTS = 1
+        module._MAX_DELETE_OPERATIONS = 1
         try:
             state = module.normalize_state({
                 "groups": [{"id": "cue", "name": "CUE++"}],
@@ -230,10 +353,28 @@ class ProjectGroupsApiTest(unittest.TestCase):
                     group_id="cue",
                 )))
             self.assertEqual(assignment_error.exception.status_code, 422)
+
+            with self.assertRaises(module.HTTPException) as expected_members_error:
+                asyncio.run(module.delete_group(module.DeleteGroupEnvelope(
+                    group_id="cue",
+                    expected_project_ids=["p1", "p2"],
+                    operation_id="delete-oversized-members",
+                )))
+            self.assertEqual(expected_members_error.exception.status_code, 422)
+
+            with self.assertRaisesRegex(ValueError, "deleteOperations exceeds 1"):
+                module.normalize_state({
+                    **state,
+                    "deleteOperations": [
+                        {"operationId": "one", "requestHash": "a" * 64},
+                        {"operationId": "two", "requestHash": "b" * 64},
+                    ],
+                })
             self.assertEqual(module._read_state(), state)
         finally:
             module._MAX_GROUPS = original_groups
             module._MAX_ASSIGNMENTS = original_assignments
+            module._MAX_DELETE_OPERATIONS = original_delete_operations
 
 
 if __name__ == "__main__":

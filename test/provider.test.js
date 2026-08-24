@@ -68,7 +68,7 @@ function context({ backend = state(), cached = state(), mutate } = {}) {
       if (mutate && options.method !== undefined) return mutate(path, options)
       if (path === '/state') return { state: backend, storage: 'backend', version: 1 }
       if (path === '/capabilities') {
-        return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed'], version: 1 }
+        return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'], version: 1 }
       }
       if (path === '/state/migrate') return { state: cached, storage: 'backend', version: 1 }
       throw new Error(`Unexpected REST request: ${path}`)
@@ -118,7 +118,7 @@ test('reloads state and mutation authority when the active profile changes A to 
     if (path === '/state') return { state: backends[profile], storage: 'backend', version: 1 }
     if (path === '/capabilities') {
       return {
-        mutations: profile === 'A' ? [] : ['createGroup', 'assignProject', 'setGroupCollapsed'],
+        mutations: profile === 'A' ? [] : ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'],
         version: 1
       }
     }
@@ -158,7 +158,7 @@ test('publishes capability-only profile changes through the grouping snapshot re
     if (path === '/state') return { state: backend, storage: 'backend', version: 1 }
     if (path === '/capabilities') {
       return {
-        mutations: host.state.profile.get() === 'mutable' ? ['createGroup', 'assignProject', 'setGroupCollapsed'] : [],
+        mutations: host.state.profile.get() === 'mutable' ? ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'] : [],
         version: 1
       }
     }
@@ -190,7 +190,7 @@ test('publishes disconnected to connected capability restoration and the reverse
     if (!connected) throw new Error('offline')
     if (path === '/state') return { state: backend, storage: 'backend', version: 1 }
     if (path === '/capabilities') {
-      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed'], version: 1 }
+      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'], version: 1 }
     }
     throw new Error(`Unexpected REST request: ${path}`)
   }
@@ -238,7 +238,7 @@ test('ignores a delayed Profile A load after switching to Profile B', async () =
     if (path === '/state' && profile === 'A') return profileA
     if (path === '/state' && profile === 'B') return { state: profileB, storage: 'backend', version: 1 }
     if (path === '/capabilities') {
-      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed'], version: 1 }
+      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'], version: 1 }
     }
     throw new Error(`Unexpected REST request: ${path}`)
   }
@@ -270,6 +270,104 @@ test('registers one stable native projects.grouping provider and no page or nav'
   assert.equal(typeof provider.createGroup, 'function')
   assert.equal(typeof provider.assignProject, 'function')
   assert.equal(typeof provider.setGroupCollapsed, 'function')
+  assert.equal(typeof provider.deleteGroup, 'function')
+})
+
+test('deleteGroup uses one exact-CAS DELETE mutation for empty and non-empty groups', async () => {
+  for (const expectedProjectIds of [[], ['p1', 'p2']]) {
+    const calls = []
+    const backend = state(Object.fromEntries(expectedProjectIds.map(projectId => [projectId, 'cue'])))
+    const deleted = { version: 1, groups: [], assignments: {}, projectOrder: {} }
+    const fixture = context({ backend })
+    fixture.ctx.rest = async (path, options = {}) => {
+      if (path === '/state') return { state: backend, storage: 'backend', version: 1 }
+      if (path === '/capabilities') {
+        return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'], version: 1 }
+      }
+      if (path === '/groups' && options.method === 'DELETE') {
+        calls.push({ path, options })
+        return { state: deleted, storage: 'backend', version: 1 }
+      }
+      throw new Error(`Unexpected REST request: ${path}`)
+    }
+
+    plugin.register(fixture.ctx)
+    const provider = fixture.registrations[0].data
+    await tick()
+    await provider.deleteGroup({
+      groupId: 'cue',
+      expectedProjectIds,
+      operationId: `delete-${expectedProjectIds.length}`
+    })
+
+    assert.deepEqual(calls, [{
+      path: '/groups',
+      options: {
+        method: 'DELETE',
+        body: {
+          group_id: 'cue',
+          expected_project_ids: expectedProjectIds,
+          operation_id: `delete-${expectedProjectIds.length}`
+        },
+        timeoutMs: 5_000
+      }
+    }])
+    assert.deepEqual(provider.getSnapshot().groups, [])
+    fixture.dispose()
+  }
+})
+
+test('deleteGroup rejects a response from a stale profile generation without publishing it', async () => {
+  let resolveDelete
+  let markDeleteStarted
+  const pendingDelete = new Promise(resolve => {
+    resolveDelete = resolve
+  })
+  const deleteStarted = new Promise(resolve => {
+    markDeleteStarted = resolve
+  })
+  const profileB = {
+    version: 1,
+    groups: [{ id: 'b', name: 'Profile B', collapsed: false }],
+    assignments: {},
+    projectOrder: {}
+  }
+  host.state.profile.set('A')
+  const fixture = context({ backend: state() })
+  fixture.ctx.rest = async (path, options = {}) => {
+    if (path === '/state') {
+      return {
+        state: host.state.profile.get() === 'A' ? state() : profileB,
+        storage: 'backend',
+        version: 1
+      }
+    }
+    if (path === '/capabilities') {
+      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed', 'deleteGroup'], version: 1 }
+    }
+    if (path === '/groups' && options.method === 'DELETE') {
+      markDeleteStarted()
+      return pendingDelete
+    }
+    throw new Error(`Unexpected REST request: ${path}`)
+  }
+
+  plugin.register(fixture.ctx)
+  const provider = fixture.registrations[0].data
+  await tick()
+  const deletion = provider.deleteGroup({
+    groupId: 'cue',
+    expectedProjectIds: [],
+    operationId: 'delete-stale-profile'
+  })
+  await deleteStarted
+  host.state.profile.set('B')
+  await tick()
+  resolveDelete({ state: { version: 1, groups: [], assignments: {}, projectOrder: {} } })
+
+  await assert.rejects(deletion, /backend changed during mutation/)
+  assert.deepEqual(provider.getSnapshot().groups.map(group => group.id), ['b'])
+  fixture.dispose()
 })
 
 test('keeps an offline cached snapshot read-only', async () => {
@@ -285,6 +383,7 @@ test('keeps an offline cached snapshot read-only', async () => {
   assert.equal(provider.createGroup, undefined)
   assert.equal(provider.assignProject, undefined)
   assert.equal(provider.setGroupCollapsed, undefined)
+  assert.equal(provider.deleteGroup, undefined)
   assert.equal(fixture.writes.length, 0)
 })
 
@@ -302,6 +401,27 @@ test('keeps an older backend read-only when state exists but mutation capability
   assert.equal(provider.createGroup, undefined)
   assert.equal(provider.assignProject, undefined)
   assert.equal(provider.setGroupCollapsed, undefined)
+  assert.equal(provider.deleteGroup, undefined)
+})
+
+test('keeps existing mutations when an older backend does not advertise deleteGroup', async () => {
+  const fixture = context({ backend: state({ p1: 'cue' }) })
+  fixture.ctx.rest = async path => {
+    if (path === '/state') return { state: state({ p1: 'cue' }), storage: 'backend', version: 1 }
+    if (path === '/capabilities') {
+      return { mutations: ['createGroup', 'assignProject', 'setGroupCollapsed'], version: 1 }
+    }
+    throw new Error(`Unexpected REST request: ${path}`)
+  }
+  plugin.register(fixture.ctx)
+  const provider = fixture.registrations[0].data
+
+  await tick()
+  assert.equal(typeof provider.createGroup, 'function')
+  assert.equal(typeof provider.assignProject, 'function')
+  assert.equal(typeof provider.setGroupCollapsed, 'function')
+  assert.equal(provider.deleteGroup, undefined)
+  fixture.dispose()
 })
 
 test('publishes exactly once after backend mutation success and never optimistically', async () => {

@@ -1,5 +1,5 @@
 name: project-groups
-version: 0.3.0
+version: 0.4.0
 description: "Group Hermes Projects in the native Desktop sidebar with profile-scoped backend persistence."
 author: CUE++
 kind: standalone

@@ -1,6 +1,7 @@
 """Profile-scoped persistence API for Hermes Project Groups."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -29,6 +30,9 @@ except ImportError:  # Allows pure state tests without dashboard dependencies.
         def put(self, *_args, **_kwargs):
             return lambda fn: fn
 
+        def delete(self, *_args, **_kwargs):
+            return lambda fn: fn
+
     class BaseModel:
         def __init__(self, **values):
             for key, value in values.items():
@@ -47,6 +51,7 @@ _SCHEMA_VERSION = 1
 _MAX_GROUPS = 200
 _MAX_ASSIGNMENTS = 20_000
 _MAX_ORDER = 20_000
+_MAX_DELETE_OPERATIONS = 256
 _MAX_TEXT = 200
 _MAX_GROUP_NAME = 100
 
@@ -67,6 +72,12 @@ class AssignProjectEnvelope(BaseModel):
 class CollapseGroupEnvelope(BaseModel):
     group_id: str
     collapsed: bool
+
+
+class DeleteGroupEnvelope(BaseModel):
+    group_id: str
+    expected_project_ids: list[str]
+    operation_id: str
 
 
 def _state_path() -> Path:
@@ -201,12 +212,37 @@ def normalize_state(raw: Any, *, repair_legacy: bool = False) -> dict[str, Any]:
                         raise ValueError(f"projectOrder exceeds {_MAX_ORDER}")
             project_order[group_id] = unique
 
-    return {
+    result = {
         "version": _SCHEMA_VERSION,
         "groups": groups,
         "assignments": assignments,
         "projectOrder": project_order,
     }
+    if "deleteOperations" in raw:
+        raw_operations = raw["deleteOperations"]
+        if not isinstance(raw_operations, list):
+            raise ValueError("deleteOperations must be an array")
+        if len(raw_operations) > _MAX_DELETE_OPERATIONS:
+            raise ValueError(f"deleteOperations exceeds {_MAX_DELETE_OPERATIONS}")
+        operations: list[dict[str, str]] = []
+        operation_ids: set[str] = set()
+        for item in raw_operations:
+            if not isinstance(item, dict):
+                raise ValueError("delete operation must be an object")
+            operation_id = _clean_text(item.get("operationId"), field="operation id")
+            request_hash = item.get("requestHash")
+            if (
+                not isinstance(request_hash, str)
+                or len(request_hash) != 64
+                or any(character not in "0123456789abcdef" for character in request_hash)
+            ):
+                raise ValueError("delete operation request hash is invalid")
+            if operation_id in operation_ids:
+                raise ValueError(f"duplicate delete operation id: {operation_id}")
+            operation_ids.add(operation_id)
+            operations.append({"operationId": operation_id, "requestHash": request_hash})
+        result["deleteOperations"] = operations
+    return result
 
 
 def _atomic_write(path: Path, state: dict[str, Any]) -> None:
@@ -256,7 +292,7 @@ def _validation_error(exc: ValueError) -> HTTPException:
 @router.get("/capabilities")
 async def get_capabilities():
     return {
-        "mutations": ["createGroup", "assignProject", "setGroupCollapsed"],
+        "mutations": ["createGroup", "assignProject", "setGroupCollapsed", "deleteGroup"],
         "version": _SCHEMA_VERSION,
     }
 
@@ -272,6 +308,7 @@ async def get_state():
 async def migrate_state(envelope: StateEnvelope):
     try:
         migrated = normalize_state(envelope.state, repair_legacy=True)
+        migrated.pop("deleteOperations", None)
     except ValueError as exc:
         raise _validation_error(exc) from exc
     with _LOCK:
@@ -345,6 +382,84 @@ async def set_group_collapsed(envelope: CollapseGroupEnvelope):
                 {**group, "collapsed": envelope.collapsed} if group["id"] == group_id else group
                 for group in current["groups"]
             ],
+        }
+        _atomic_write(_state_path(), current)
+    return _response(current)
+
+
+def _delete_request(envelope: DeleteGroupEnvelope) -> tuple[str, list[str], str, str]:
+    try:
+        group_id = _clean_text(envelope.group_id, field="group id")
+        operation_id = _clean_text(envelope.operation_id, field="operation id")
+        raw_project_ids = envelope.expected_project_ids
+        if not isinstance(raw_project_ids, list):
+            raise ValueError("expected project ids must be an array")
+        if len(raw_project_ids) > _MAX_ASSIGNMENTS:
+            raise ValueError(f"expected project ids exceeds {_MAX_ASSIGNMENTS}")
+        expected_project_ids = [
+            _clean_text(project_id, field="project id") for project_id in raw_project_ids
+        ]
+        if len(set(expected_project_ids)) != len(expected_project_ids):
+            raise ValueError("expected project ids must be unique")
+    except ValueError as exc:
+        raise _validation_error(exc) from exc
+    fingerprint = json.dumps(
+        {"groupId": group_id, "expectedProjectIds": sorted(expected_project_ids)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    request_hash = hashlib.sha256(fingerprint).hexdigest()
+    return group_id, expected_project_ids, operation_id, request_hash
+
+
+@router.delete("/groups")
+async def delete_group(envelope: DeleteGroupEnvelope):
+    group_id, expected_project_ids, operation_id, request_hash = _delete_request(envelope)
+
+    with _LOCK:
+        current = _read_state() or _empty_state()
+        operations = current.get("deleteOperations", [])
+        prior = next(
+            (item for item in operations if item["operationId"] == operation_id),
+            None,
+        )
+        if prior is not None:
+            if prior["requestHash"] != request_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Delete operation id was already used for another request: {operation_id}",
+                )
+            return _response(current)
+
+        if not any(group["id"] == group_id for group in current["groups"]):
+            raise HTTPException(status_code=404, detail=f"Unknown Project group: {group_id}")
+        actual_project_ids = {
+            project_id
+            for project_id, assigned_group_id in current["assignments"].items()
+            if assigned_group_id == group_id
+        }
+        if actual_project_ids != set(expected_project_ids):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Project group member set changed: {group_id}",
+            )
+
+        project_order = dict(current["projectOrder"])
+        project_order.pop(group_id, None)
+        current = {
+            **current,
+            "groups": [group for group in current["groups"] if group["id"] != group_id],
+            "assignments": {
+                project_id: assigned_group_id
+                for project_id, assigned_group_id in current["assignments"].items()
+                if assigned_group_id != group_id
+            },
+            "projectOrder": project_order,
+            "deleteOperations": [
+                *operations,
+                {"operationId": operation_id, "requestHash": request_hash},
+            ][-_MAX_DELETE_OPERATIONS:],
         }
         _atomic_write(_state_path(), current)
     return _response(current)

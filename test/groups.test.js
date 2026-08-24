@@ -84,13 +84,15 @@ test('deleting a group removes its project assignments without affecting other g
         { id: 'one', name: 'One' },
         { id: 'two', name: 'Two' }
       ],
-      assignments: { a: 'one', b: 'two' }
+      assignments: { a: 'one', b: 'two' },
+      projectOrder: { one: ['a'], two: ['b'], __ungrouped__: ['c'] }
     },
     'one'
   )
 
   assert.deepEqual(state.groups, [{ id: 'two', name: 'Two', collapsed: false }])
   assert.deepEqual(state.assignments, { b: 'two' })
+  assert.deepEqual(state.projectOrder, { two: ['b'], __ungrouped__: ['c'] })
 })
 
 test('normalizeState repairs malformed and dangling persisted data', () => {

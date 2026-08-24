@@ -9,6 +9,7 @@ A shareable Hermes plugin that organizes flat Projects into collapsible groups i
 - Contributes one stable `projects.grouping` provider to the existing native Projects list.
 - Creates groups through Hermes's native folder-plus dialog.
 - Assigns and unassigns Projects through each native Project menu.
+- Exposes exact-membership group deletion to compatible native Desktop builds; former members become Ungrouped without deleting Projects.
 - Persists collapse state, group order, and membership per active backend/profile.
 - Keeps native Project rows, activation, sessions, worktrees, menus, and appearance core-owned.
 - Leaves the canonical Hermes Project database, repositories, and filesystem paths untouched.
@@ -56,7 +57,7 @@ npm test
 npm run check
 ```
 
-The Desktop entrypoint is plain, dependency-free ESM with no build step. `plugin.js` and `desktop/plugin.js` are kept byte-identical. Tests cover the reusable grouping rules, authoritative backend mutations, provider publication semantics, offline behavior, migration, and process reloads.
+The Desktop entrypoint is plain, dependency-free ESM with no build step. `plugin.js` and `desktop/plugin.js` are kept byte-identical. Tests cover the reusable grouping rules, authoritative backend mutations, exact-membership deletion and retry idempotency, provider publication semantics, offline behavior, migration, and process reloads.
 
 ## Agent and LLM awareness
 
@@ -78,14 +79,14 @@ The preferred persistence path is the plugin's profile-scoped backend:
 $HERMES_HOME/project-groups/state.json
 ```
 
-Writes are lock-protected, validated, bounded, and atomic. Create, assign/unassign, and collapse mutations succeed on the backend before Desktop updates its cache or publishes a new snapshot. The Desktop copy under `hermes.plugin.project-groups.state.v1` is a read-only offline fallback and one-time migration source; it is never an offline write authority. Project IDs and filesystem paths are backend/profile-specific, so local and remote Projects remain distinct even when they share a group label.
+Writes are lock-protected, validated, bounded, and atomic. Create, assign/unassign, collapse, and delete mutations succeed on the backend before Desktop updates its cache or publishes a new snapshot. Delete uses an exact member-set compare-and-swap and records a bounded durable operation ledger in the same atomic state replacement, making response retries idempotent. The Desktop copy under `hermes.plugin.project-groups.state.v1` is a read-only offline fallback and one-time migration source; it is never an offline write authority. Project IDs and filesystem paths are backend/profile-specific, so local and remote Projects remain distinct even when they share a group label.
 
 ## Current limitations
 
 - Desktop builds without `projects.grouping` cannot render the native grouping provider; no duplicate page fallback is registered.
 - Cross-gateway organization identity is not merged automatically; each backend/profile owns its Project assignments.
 - Nested groups and grouped drag-reordering are outside the v1 native contract.
-- When the backend is unavailable, the last cache remains visible but create, move, and collapse controls are unavailable.
+- When the backend is unavailable, the last cache remains visible but create, move, collapse, and delete controls are unavailable.
 
 ## License
 

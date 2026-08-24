@@ -90,6 +90,33 @@ class ProjectGroupsToolsTest(unittest.TestCase):
         }
         self.assertEqual(reported_assignments, expected_assignments)
 
+    def test_agent_reload_reports_deleted_group_projects_as_ungrouped(self):
+        asyncio.run(api.delete_group(api.DeleteGroupEnvelope(
+            group_id="cue",
+            expected_project_ids=["p_cue"],
+            operation_id="delete-cue-for-agent-reload",
+        )))
+
+        reload_spec = importlib.util.spec_from_file_location(
+            "project_groups_plugin_after_delete", MODULE_PATH
+        )
+        assert reload_spec is not None and reload_spec.loader is not None
+        reloaded = importlib.util.module_from_spec(reload_spec)
+        reload_spec.loader.exec_module(reloaded)
+        reloaded._projects = lambda: [
+            {
+                "id": "p_cue",
+                "name": "Quotamate",
+                "primary_path": "/work/cue++/quotamate",
+                "archived": False,
+            },
+        ]
+
+        agent = reloaded.list_groups()
+        self.assertEqual(agent["groups"], [])
+        self.assertEqual([project["id"] for project in agent["ungrouped"]], ["p_cue"])
+        self.assertFalse(reloaded.get_group("cue")["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

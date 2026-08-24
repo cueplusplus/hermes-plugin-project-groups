@@ -3,7 +3,7 @@ import { host } from '@hermes/plugin-sdk'
 const ID = 'project-groups'
 const GROUPING_AREA = 'projects.grouping'
 const STORAGE_KEY = 'state.v1'
-const MUTATION_CAPABILITIES = ['createGroup', 'assignProject', 'setGroupCollapsed']
+const BASE_MUTATION_CAPABILITIES = ['createGroup', 'assignProject', 'setGroupCollapsed']
 const DEFAULT_GROUPS = [
   { id: 'cue', name: 'CUE++', collapsed: false },
   { id: 'rgc-labs', name: 'RGC-LABS', collapsed: false },
@@ -204,17 +204,27 @@ function createProvider(ctx) {
     mutate('/assign', 'PUT', { project_id: projectId, group_id: groupId })
   const setGroupCollapsed = (groupId, collapsed) =>
     mutate('/groups/collapsed', 'PUT', { group_id: groupId, collapsed })
+  const deleteGroup = ({ groupId, expectedProjectIds, operationId }) =>
+    mutate('/groups', 'DELETE', {
+      group_id: groupId,
+      expected_project_ids: expectedProjectIds,
+      operation_id: operationId
+    })
 
-  const enableMutations = () => {
-    provider.createGroup = createGroup
-    provider.assignProject = assignProject
-    provider.setGroupCollapsed = setGroupCollapsed
+  const enableMutations = capabilities => {
+    if (BASE_MUTATION_CAPABILITIES.every(item => capabilities.includes(item))) {
+      provider.createGroup = createGroup
+      provider.assignProject = assignProject
+      provider.setGroupCollapsed = setGroupCollapsed
+    }
+    if (capabilities.includes('deleteGroup')) provider.deleteGroup = deleteGroup
   }
 
   const disableMutations = () => {
     delete provider.createGroup
     delete provider.assignProject
     delete provider.setGroupCollapsed
+    delete provider.deleteGroup
   }
 
   const load = async (requestGeneration, migrationState) => {
@@ -239,9 +249,7 @@ function createProvider(ctx) {
     try {
       const capabilities = await ctx.rest('/capabilities', { timeoutMs: 5_000 })
       if (generation !== requestGeneration) return
-      if (Array.isArray(capabilities?.mutations) && MUTATION_CAPABILITIES.every(item => capabilities.mutations.includes(item))) {
-        enableMutations()
-      }
+      if (Array.isArray(capabilities?.mutations)) enableMutations(capabilities.mutations)
     } catch {
       // State from a v0.2 backend remains visible without mutation callbacks.
     }

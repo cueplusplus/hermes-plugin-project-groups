@@ -1,7 +1,8 @@
 ---
 name: project-groups
 description: "Use when choosing or explaining Hermes Project groups."
-version: 0.3.0
+metadata:
+  version: "0.4.0"
 ---
 
 # Hermes Project Groups
@@ -17,7 +18,8 @@ Project Groups are an organizational layer over Hermes Projects. A **Project** r
 5. Local and remote Hermes profiles have independent Project IDs and assignments. A shared group label such as `CUE++` does not make local and remote Project records identical.
 6. To work in a Project, use its actual primary path or the ordinary Hermes Project controls. The group itself is not a working directory.
 7. If backend state is unavailable, say the grouping data could not be retrieved; do not reconstruct it from memory as if authoritative.
-8. Group create, move/unassign, and collapse operations are handled by native Desktop controls and persist to the active backend before the sidebar changes. The agent tools are read-only.
+8. Group create, move/unassign, collapse, and delete operations are handled by native Desktop controls and persist to the active backend before the sidebar changes. The agent tools are read-only.
+9. Deleting a group never deletes its Projects, sessions, folders, boards, or worktrees. Former members become Ungrouped, and agent tools report that authoritative state after process reload.
 
 ## Model
 
