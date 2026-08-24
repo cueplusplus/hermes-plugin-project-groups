@@ -11,7 +11,7 @@ It is intended to be safe for a human **or another coding agent** to apply. The 
 | Hermes upstream base | `981101239a064c020a9d18fc3b1060ae306934ed` |
 | Source line | Hermes Desktop 0.20.5-era checkout |
 | Patch count | 14 ordered commits |
-| Project Groups plugin | `0c58068` (v0.4.0 source revision) |
+| Project Groups plugin | `0c58068035202f5defcf25270bee37ffd63d9a9b` (v0.4.0) |
 | Plugin repository | <https://github.com/cueplusplus/hermes-plugin-project-groups> |
 
 This is **not** a floating patch. A newer Hermes version is unsupported until the series is rebased and verification passes again.
@@ -87,7 +87,7 @@ Verification runs:
 
 ```bash
 hermes plugins install https://github.com/cueplusplus/hermes-plugin-project-groups.git \
-  --ref 0c58068 \
+  --ref 0c58068035202f5defcf25270bee37ffd63d9a9b \
   --force --no-enable
 hermes plugins enable project-groups
 ```
